@@ -1,0 +1,4 @@
+#!/bin/sh
+# Launch coolify from its skill package.
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec /usr/bin/env python3 "$DIR/coolify.d/coolify.py" "$@"
