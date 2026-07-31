@@ -69,7 +69,8 @@ class IntegrationCatalog(unittest.TestCase):
             "BEGIN OPENSSH PRIVATE KEY", "BEGIN RSA PRIVATE KEY",
         )
         for path in (ROOT / "skills").rglob("*"):
-            if path.is_file() and ".git" not in path.parts:
+            if (path.is_file() and ".git" not in path.parts
+                    and "__pycache__" not in path.parts and path.suffix != ".pyc"):
                 with self.subTest(path=path.relative_to(ROOT)):
                     text = path.read_text(encoding="utf-8", errors="ignore").lower()
                     self.assertFalse(any(value.lower() in text for value in forbidden))
