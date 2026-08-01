@@ -772,7 +772,7 @@ def mutation(
     if not args.confirm:
         print("mode\tdry-run")
         print(
-            f"next\tOwner approval required. Re-run with --confirm only after Tim approves "
+            f"next\tOwner approval required. Re-run with --confirm only after the owner approves "
             f"{action} on profile {profile.name}."
         )
         return 0

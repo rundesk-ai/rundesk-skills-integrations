@@ -1,6 +1,6 @@
 ---
 name: confluence
-description: Read Confluence Cloud spaces, page trees, search results, and page bodies through the local Confluence CLI. Use when a task mentions Confluence, internal documentation, a space or page, runbooks, specifications, or knowledge stored in Atlassian.
+description: Read Confluence Cloud spaces, page trees, search results, and bodies with the bundled CLI. Use for Confluence, Atlassian knowledge, internal docs, spaces, pages, runbooks, or specifications.
 ---
 
 # Confluence

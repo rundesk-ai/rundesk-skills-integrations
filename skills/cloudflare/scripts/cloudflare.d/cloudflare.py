@@ -860,7 +860,7 @@ def cmd_register(args: argparse.Namespace) -> int:
     if not args.confirm:
         print("mode\tdry-run")
         print(
-            "next\tOwner approval required. Re-run with --confirm only after Tim approves "
+            "next\tOwner approval required. Re-run with --confirm only after the owner approves "
             f"registering {domain} for {years} year(s) on profile {profile.name}."
         )
         print(
@@ -959,7 +959,7 @@ def cmd_dns_add(args: argparse.Namespace) -> int:
     if not args.confirm:
         print("mode\tdry-run")
         print(
-            "next\tOwner approval required. Re-run with --confirm only after Tim approves "
+            "next\tOwner approval required. Re-run with --confirm only after the owner approves "
             f"creating this {record_type} record on {zone_name}."
         )
         return 0
@@ -1023,7 +1023,7 @@ def cmd_dns_set(args: argparse.Namespace) -> int:
     if not args.confirm:
         print("mode\tdry-run")
         print(
-            "next\tOwner approval required. Re-run with --confirm only after Tim approves "
+            "next\tOwner approval required. Re-run with --confirm only after the owner approves "
             f"updating DNS record {record_id} on {zone_name}."
         )
         return 0
@@ -1065,7 +1065,7 @@ def cmd_dns_rm(args: argparse.Namespace) -> int:
     if not args.confirm:
         print("mode\tdry-run")
         print(
-            "next\tOwner approval required. Re-run with --confirm only after Tim approves "
+            "next\tOwner approval required. Re-run with --confirm only after the owner approves "
             f"deleting DNS record {record_id} on {zone_name}."
         )
         return 0

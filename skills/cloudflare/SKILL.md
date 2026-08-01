@@ -1,6 +1,6 @@
 ---
 name: cloudflare
-description: Cloudflare domains, zones, registrar checks, and guarded DNS changes through the local cloudflare CLI. Use when a task mentions Cloudflare, DNS records, domain ownership, domain availability, registering a domain, nameservers, or zone config — even if nobody says "Cloudflare".
+description: Manage Cloudflare domains, zones, registrar checks, and guarded DNS changes with the bundled CLI. Use for DNS records, domain ownership or availability, registration, nameservers, or zone configuration—even when Cloudflare is not named.
 ---
 
 # Cloudflare
@@ -39,7 +39,7 @@ Bound lists. Prefer CSV text over `--json` unless structured data is required.
 
 `register`, `dns-add`, `dns-set`, and `dns-rm` are **dry-run without `--confirm`**.
 
-Never pass `--confirm` unless Tim approved that exact domain/record change in this
+Never pass `--confirm` unless the owner approved that exact domain/record change in this
 conversation. Show the dry-run output first when proposing a write.
 
 ```sh

@@ -1,6 +1,6 @@
 ---
 name: jira
-description: Read Jira Cloud projects, issues, comments, and attachment metadata through the local Jira CLI. Use when a task mentions Jira, a ticket or issue key, backlog or project work, comments, or Jira attachments.
+description: Read Jira Cloud projects, issues, comments, and attachment metadata with the bundled CLI. Use for Jira, ticket keys, backlogs, project work, comments, or attachments.
 ---
 
 # Jira

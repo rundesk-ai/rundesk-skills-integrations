@@ -1,6 +1,6 @@
 ---
 name: sentry
-description: Read, inspect, search, and safely preview resolution of Sentry issues through the local Sentry CLI. Use when a task mentions Sentry, production errors, exceptions, event evidence, stack traces, unresolved issues, or an error identifier.
+description: Inspect Sentry issues and preview guarded resolution with the bundled CLI. Use for production errors, exceptions, event evidence, stack traces, unresolved issues, error IDs, or any task mentioning Sentry.
 ---
 
 # Sentry

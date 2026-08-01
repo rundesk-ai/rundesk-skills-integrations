@@ -6,10 +6,6 @@ category: providers
 
 # confluence
 
-## Use When
-
-Use this integration when an agent needs Confluence Cloud spaces, page lists, document trees, page search, or page detail across configured Atlassian profiles. The integration is read-only and does not create, edit, move, delete, comment on, or upload Confluence content.
-
 ## Entry Point
 
 - List configured profiles: `confluence profiles`
@@ -39,7 +35,7 @@ Default output is compact text for agent context. `list` prints CSV-style page r
 
 ## Provider
 
-This integration is self-contained: its provider contract lives here, in this README, not in a separate file or a shared folder.
+This integration is self-contained: its provider contract lives in this reference, not in a separate file or shared folder.
 
 The integration reads Confluence Cloud through Atlassian REST APIs. It does not require browser login state or Atlassian CLI state. It supports multiple profiles through `.env` keys, where one profile maps to one Atlassian site/account credential and its known Confluence spaces.
 
