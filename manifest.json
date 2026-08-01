@@ -1,13 +1,14 @@
 {
   "schema": 1,
   "name": "rundesk-skills-integrations",
-  "version": "0.1.1",
-  "description": "Guarded service integrations for Cloudflare, Atlassian, Coolify, and Sentry.",
+  "version": "0.2.0",
+  "description": "Guarded service integrations for Cloudflare, Atlassian, Coolify, Sentry, and Stripe.",
   "skills": [
     {"name": "cloudflare", "path": "skills/cloudflare"},
     {"name": "confluence", "path": "skills/confluence"},
     {"name": "coolify", "path": "skills/coolify"},
     {"name": "jira", "path": "skills/jira"},
-    {"name": "sentry", "path": "skills/sentry"}
+    {"name": "sentry", "path": "skills/sentry"},
+    {"name": "stripe", "path": "skills/stripe"}
   ]
 }

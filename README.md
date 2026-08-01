@@ -1,8 +1,8 @@
 # Rundesk Integration Skills
 
 Reusable Agent Skills that package guarded service CLIs with their operating guidance and
-offline tests. This catalog currently includes Cloudflare, Confluence, Coolify, Jira, and
-Sentry.
+offline tests. This catalog currently includes Cloudflare, Confluence, Coolify, Jira, Sentry,
+and Stripe.
 
 ```sh
 rundesk skills install https://github.com/rundesk-ai/rundesk-skills-integrations
