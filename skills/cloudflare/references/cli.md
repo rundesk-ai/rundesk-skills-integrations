@@ -6,10 +6,6 @@ category: providers
 
 # cloudflare
 
-## Use When
-
-Use this integration when an agent needs Cloudflare account context: which domains/zones are on the account, whether a domain already exists there or in Cloudflare Registrar, domain availability/registrar detail, listing DNS records, and guarded create/update/delete of DNS records or domain registration after explicit owner approval.
-
 ## Entry Point
 
 - List profiles: `cloudflare profiles`
@@ -113,4 +109,4 @@ Credential search order: process env → `--env-file` → `CLOUDFLARE_ENV_FILE` 
 | `dns-set` | Prints plan only | Patches one DNS record |
 | `dns-rm` | Prints plan only | Deletes one DNS record |
 
-Owner authorization for the exact domain/record is required in addition to `--confirm`. Agents must not confirm mutations unless Tim approved that exact action in the conversation.
+Owner authorization for the exact domain/record is required in addition to `--confirm`. Agents must not confirm mutations unless the owner approved that exact action in the conversation.

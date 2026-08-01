@@ -6,10 +6,6 @@ category: providers
 
 # coolify
 
-## Use When
-
-Use this integration when an agent needs Coolify instance context: servers, applications, one-click services, databases, projects, deployments, logs, env key inventory, and guarded lifecycle actions (start/stop/restart/deploy) after explicit owner approval.
-
 ## Entry Point
 
 Bundled command: `$RUNDESK_SKILLS/coolify/scripts/coolify`.

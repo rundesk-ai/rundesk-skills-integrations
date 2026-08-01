@@ -1,9 +1,5 @@
 # Sentry CLI reference
 
-## Use When
-
-Use this integration when an agent needs Sentry issue context across configured Sentry profiles: profile discovery, project listing, bounded issue listing/search, issue detail, linked external issue references, recent event evidence, and guarded one-issue Sentry resolution.
-
 The integration is Sentry-only. It may show external issue links that Sentry returns, including Jira-looking links, but it does not call Jira, transition Jira tickets, or depend on another integration.
 
 ## Entry Point

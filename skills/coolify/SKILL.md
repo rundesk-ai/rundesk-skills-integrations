@@ -1,6 +1,6 @@
 ---
 name: coolify
-description: Coolify servers, apps, services, databases, deployments, logs, and guarded restarts/deploys through the local coolify CLI. Use when a task mentions Coolify, self-hosted deploys, app restart, container status, or Coolify resources — even if nobody says "Coolify".
+description: Inspect Coolify resources and preview guarded restarts or deploys with the bundled CLI. Use for servers, apps, services, databases, deployments, logs, self-hosted operations, or container status—even when Coolify is not named.
 ---
 
 # Coolify
@@ -38,7 +38,7 @@ Bound lists. Prefer CSV text over `--json`. `envs` redacts values unless
 
 `start`, `stop`, `restart`, and `deploy` are **dry-run without `--confirm`**.
 
-Never pass `--confirm` unless Tim approved that exact resource action in this
+Never pass `--confirm` unless the owner approved that exact resource action in this
 conversation. Show dry-run output first.
 
 ```sh

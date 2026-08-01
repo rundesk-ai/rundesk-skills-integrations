@@ -6,10 +6,6 @@ category: providers
 
 # jira
 
-## Use When
-
-Use this integration when an agent needs Jira Cloud project, issue, comment, attachment, or issue-key resolution context across configured Atlassian profiles. The integration is read-only against Jira; the only write it performs is an explicit local attachment download to a user-provided output path.
-
 ## Entry Point
 
 - List configured profiles: `jira profiles`
@@ -44,7 +40,7 @@ Do not run `attachment --output --confirm` as a smoke test unless the owner conf
 
 ## Provider
 
-This integration is self-contained: its provider contract lives here, in this README, not in a separate file or a shared folder.
+This integration is self-contained: its provider contract lives in this reference, not in a separate file or shared folder.
 
 The integration reads Jira Cloud through the Atlassian REST API. It does not require browser login state or Atlassian CLI state. It supports multiple profiles through `.env` keys, where one profile maps to one Atlassian site/account credential and its known Jira project keys.
 

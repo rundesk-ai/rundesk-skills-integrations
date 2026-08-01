@@ -36,6 +36,18 @@ class IntegrationCatalog(unittest.TestCase):
                 self.assertEqual(name, package.name)
                 page = (package / "SKILL.md").read_text(encoding="utf-8")
                 self.assertRegex(page, rf"(?m)^name: {re.escape(name)}$")
+                frontmatter = page.split("---", 2)[1]
+                keys = [line.split(":", 1)[0] for line in frontmatter.splitlines()
+                        if line and not line.startswith(" ")]
+                self.assertEqual(["name", "description"], keys)
+                description = re.search(
+                    r"(?m)^description: (.+)$", frontmatter
+                ).group(1)
+                self.assertLessEqual(len(description), 1024)
+                self.assertIn("Use ", description)
+                self.assertLess(len(page.splitlines()), 500)
+                self.assertFalse((package / "README.md").exists())
+                self.assertFalse((package / "CHANGELOG.md").exists())
                 self.assertTrue((package / "scripts" / name).is_file())
 
     def test_every_launcher_has_credential_free_help(self):
@@ -72,8 +84,14 @@ class IntegrationCatalog(unittest.TestCase):
             if (path.is_file() and ".git" not in path.parts
                     and "__pycache__" not in path.parts and path.suffix != ".pyc"):
                 with self.subTest(path=path.relative_to(ROOT)):
-                    text = path.read_text(encoding="utf-8", errors="ignore").lower()
+                    raw = path.read_text(encoding="utf-8", errors="ignore")
+                    text = raw.lower()
                     self.assertFalse(any(value.lower() in text for value in forbidden))
+                    self.assertNotRegex(
+                        raw,
+                        r"\b(?:after|unless)\s+(?!the owner\b)[A-Z][a-z]+\s+approve",
+                    )
+                    self.assertNotIn("## use when", text)
 
     def test_environment_contract_is_documented_and_implemented(self):
         documented = (ROOT / "ENVIRONMENTS.md").read_text(encoding="utf-8")
