@@ -24,7 +24,9 @@ class IntegrationCatalog(unittest.TestCase):
         self.assertEqual("rundesk-skills-integrations", self.manifest["name"])
         self.assertRegex(self.manifest["version"], r"^\d+\.\d+\.\d+$")
         declared = {entry["name"]: entry["path"] for entry in self.manifest["skills"]}
-        self.assertEqual({"cloudflare", "confluence", "coolify", "jira", "sentry"}, set(declared))
+        self.assertEqual(
+            {"cloudflare", "confluence", "coolify", "jira", "sentry", "stripe"}, set(declared)
+        )
         self.assertEqual(
             sorted(declared),
             sorted(path.name for path in (ROOT / "skills").iterdir() if path.is_dir()),
@@ -125,6 +127,10 @@ class IntegrationCatalog(unittest.TestCase):
             "sentry": [
                 "SENTRY_PROFILES=demo", "SENTRY_DEMO_TOKEN=synthetic-token",
                 "SENTRY_DEMO_ORG=example", "SENTRY_DEMO_BASE_URL=https://sentry.example.test",
+            ],
+            "stripe": [
+                "STRIPE_PROFILES=demo", "STRIPE_DEMO_KEY=rk_test_synthetic",
+                "STRIPE_DEMO_LABEL=Example",
             ],
         }
         with tempfile.TemporaryDirectory(prefix="rundesk-integration-env-") as temporary:
