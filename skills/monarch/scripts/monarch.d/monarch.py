@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Read a Monarch Money household: accounts, net worth, spending, budgets, and holdings.
+Read a Monarch Money household, and edit the parts of it the owner approved.
 
 Usage:
   monarch profiles
@@ -13,6 +13,16 @@ Usage:
   monarch budgets [--profile household] [--month 2026-08] [--limit 100]
   monarch cashflow [--profile household] [--days 30] [--limit 25]
   monarch holdings --account NAME [--profile household] [--limit 50]
+  monarch rules [--profile household] [--limit 100]
+  monarch edit TXN... [--category NAME] [--merchant NAME] [--note TEXT]
+                      [--confirm] [--max 50]
+  monarch tag TXN... [--add NAME] [--remove NAME] [--confirm] [--max 50]
+  monarch category create --name NAME --group GROUP [--confirm]
+  monarch rule create --merchant-contains TEXT --category NAME [--confirm]
+  monarch rule delete RULE_ID [--confirm]
+  monarch budget set --category NAME --month 2026-08 --amount N [--confirm]
+  monarch undo --list
+  monarch undo BATCH [--confirm]
 
 Inputs:
   Reads process env or an explicit/shared/isolated dotenv. Configure MONARCH_PROFILES
@@ -25,8 +35,12 @@ Outputs:
   digits are redacted to the last two, and bounded reads report `showing N of M` on
   stderr. No raw JSON unless --json is provided.
 
-  Every command reads. This package contains no command that creates, updates, or
-  deletes a transaction, budget, goal, holding, or account.
+Writes:
+  Every write previews and sends nothing until an exact --confirm, is refused above a
+  50-target cap unless --max raises it, is read back after it lands, and is journalled so
+  `undo` can put it back. Only the operations in MUTATIONS can be sent. Nothing here
+  changes an amount, a date, an account, or a pending state; nothing deletes or splits a
+  transaction; nothing deletes a category.
 """
 
 from __future__ import annotations
@@ -50,7 +64,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from dataclasses import dataclass
+# Aliased: `Change` has an attribute called `field`, and two meanings for one name in one
+# class body is how a reader loses the thread.
+from dataclasses import dataclass, field as dataclass_field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable
@@ -76,11 +92,20 @@ CAPTCHA_ERROR_CODE = "CAPTCHA_REQUIRED"
 
 ACCOUNT_COLUMNS = ["type", "subtype", "institution", "name", "mask", "balance", "updated"]
 NETWORTH_COLUMNS = ["point", "date", "assets", "liabilities", "net"]
-TRANSACTION_COLUMNS = ["date", "merchant", "category", "account", "amount", "pending"]
+# `id` leads, because a write command can only name a transaction the read already named.
+TRANSACTION_COLUMNS = ["id", "date", "merchant", "category", "account", "amount", "pending"]
 CATEGORY_COLUMNS = ["group", "type", "name", "id"]
 BUDGET_COLUMNS = ["group", "category", "budgeted", "actual", "remaining"]
 CASHFLOW_COLUMNS = ["scope", "name", "type", "amount"]
 HOLDING_COLUMNS = ["ticker", "name", "quantity", "price", "value"]
+GROUP_COLUMNS = ["type", "name", "id"]
+TAG_COLUMNS = ["name", "id", "transactions"]
+RULE_COLUMNS = ["id", "matches", "sets", "applied"]
+CHANGE_COLUMNS = ["target", "what", "field", "before", "after"]
+BATCH_COLUMNS = ["batch", "when", "profile", "changes", "state"]
+
+# A write over this many targets is refused unless --max raises it in that one run.
+DEFAULT_BULK_CAP = 50
 
 MASK_PATTERN = re.compile(r"\d")
 
@@ -200,6 +225,164 @@ query Web_GetHoldings($input: PortfolioInput) {
   }
 }
 """
+
+
+QUERY_TRANSACTION = """
+query GetTransactionDrawer($id: UUID!, $redirectPosted: Boolean) {
+  getTransaction(id: $id, redirectPosted: $redirectPosted) {
+    id
+    date
+    amount
+    pending
+    notes
+    category { id name }
+    merchant { id name }
+    account { id displayName }
+    tags { id name }
+  }
+}
+"""
+
+QUERY_CATEGORY_GROUPS = """
+query ManageGetCategoryGroups {
+  categoryGroups {
+    id
+    name
+    order
+    type
+  }
+}
+"""
+
+QUERY_TAGS = """
+query GetHouseholdTransactionTags($search: String, $limit: Int) {
+  householdTransactionTags(search: $search, limit: $limit) {
+    id
+    name
+    color
+    order
+    transactionCount
+  }
+}
+"""
+
+QUERY_RULES = """
+query GetTransactionRules {
+  transactionRules {
+    id
+    order
+    merchantCriteriaUseOriginalStatement
+    merchantCriteria { operator value }
+    merchantNameCriteria { operator value }
+    amountCriteria { operator isExpense value }
+    categoryIds
+    accountIds
+    setCategoryAction { id name }
+    setMerchantAction { id name }
+    addTagsAction { id name }
+    setHideFromReportsAction
+    reviewStatusAction
+    recentApplicationCount
+    lastAppliedAt
+  }
+}
+"""
+
+# ---------------------------------------------------------------------------
+# The write surface.
+#
+# `UpdateTransactionMutationInput` also accepts amount, date, accountId, and
+# hideFromReports. This package sends none of them: `edit` assembles its input from
+# exactly three flags, and there is no flag, branch, or fall-through that reaches a
+# fourth. The offline suite asserts it, and asserts that no document here deletes a
+# transaction or a category or splits one.
+# ---------------------------------------------------------------------------
+
+MUTATION_UPDATE_TRANSACTION = """
+mutation Web_TransactionDrawerUpdateTransaction($input: UpdateTransactionMutationInput!) {
+  updateTransaction(input: $input) {
+    transaction {
+      id
+      notes
+      category { id name }
+      merchant { id name }
+    }
+    errors { message code fieldErrors { field messages } }
+  }
+}
+"""
+
+MUTATION_SET_TAGS = """
+mutation Web_SetTransactionTags($input: SetTransactionTagsInput!) {
+  setTransactionTags(input: $input) {
+    transaction { id tags { id name } }
+    errors { message code fieldErrors { field messages } }
+  }
+}
+"""
+
+MUTATION_CREATE_CATEGORY = """
+mutation Web_CreateCategory($input: CreateCategoryInput!) {
+  createCategory(input: $input) {
+    category { id name group { id name type } }
+    errors { message code fieldErrors { field messages } }
+  }
+}
+"""
+
+MUTATION_CREATE_RULE = """
+mutation Common_CreateTransactionRuleMutationV2($input: CreateTransactionRuleInput!) {
+  createTransactionRuleV2(input: $input) {
+    errors { message code fieldErrors { field messages } }
+  }
+}
+"""
+
+MUTATION_DELETE_RULE = """
+mutation Common_DeleteTransactionRule($id: ID!) {
+  deleteTransactionRule(id: $id) {
+    deleted
+    errors { message code fieldErrors { field messages } }
+  }
+}
+"""
+
+MUTATION_SET_BUDGET = """
+mutation Common_UpdateBudgetItem($input: UpdateOrCreateBudgetItemMutationInput!) {
+  updateOrCreateBudgetItem(input: $input) {
+    budgetItem { id budgetAmount }
+  }
+}
+"""
+
+# The allowlist. `mutate` sends nothing that is not a value here, so adding a verb that
+# writes to a live household means editing this mapping — which is the reviewed change
+# the repository's rules require, not an incidental one.
+MUTATIONS = {
+    "Web_TransactionDrawerUpdateTransaction": MUTATION_UPDATE_TRANSACTION,
+    "Web_SetTransactionTags": MUTATION_SET_TAGS,
+    "Web_CreateCategory": MUTATION_CREATE_CATEGORY,
+    "Common_CreateTransactionRuleMutationV2": MUTATION_CREATE_RULE,
+    "Common_DeleteTransactionRule": MUTATION_DELETE_RULE,
+    "Common_UpdateBudgetItem": MUTATION_SET_BUDGET,
+}
+
+# Where each mutation's payload — and so its per-field errors — lives in the response.
+MUTATION_ROOTS = {
+    "Web_TransactionDrawerUpdateTransaction": "updateTransaction",
+    "Web_SetTransactionTags": "setTransactionTags",
+    "Web_CreateCategory": "createCategory",
+    "Common_CreateTransactionRuleMutationV2": "createTransactionRuleV2",
+    "Common_DeleteTransactionRule": "deleteTransactionRule",
+    "Common_UpdateBudgetItem": "updateOrCreateBudgetItem",
+}
+
+# `edit --merchant` sets `name` and `--category` sets `category`; both community sources
+# carry a comment warning that the obvious spellings are wrong.
+TRANSACTION_INPUT_FIELDS = {"category": "category", "merchant": "name", "notes": "notes"}
+
+# The default emoji both community sources send when no icon was chosen.
+CATEGORY_ICON = "\U00002753"
 
 
 class MonarchError(RuntimeError):
@@ -428,6 +611,16 @@ def parse_month(value: str) -> datetime.date:
         return datetime.datetime.strptime(value, "%Y-%m").date().replace(day=1)
     except ValueError as exc:
         raise MonarchError(f"Invalid --month {value!r}. Use YYYY-MM.") from exc
+
+
+def parse_amount(value: Any) -> Decimal:
+    """A budget amount must never fall back to zero silently; a typo is an error."""
+    try:
+        return Decimal(str(value).strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise MonarchError(
+            f"Invalid --amount {value!r}. Pass a number such as 750 or 750.00."
+        ) from exc
 
 
 def today() -> datetime.date:
@@ -765,6 +958,241 @@ def graphql_error(errors: Any) -> str:
     return "; ".join(messages) if messages else truncate(errors, 300)
 
 
+def mutate(profile: Profile, operation: str, variables: dict) -> dict:
+    """Send one allowlisted mutation. Nothing outside `MUTATIONS` can be sent from here."""
+    document = MUTATIONS.get(operation)
+    if document is None:
+        raise MonarchError(
+            f"Refusing to send {operation!r}: it is not on this package's mutation allowlist. "
+            f"The approved operations are {', '.join(sorted(MUTATIONS))}."
+        )
+
+    data = graphql(profile, operation, document, variables)
+    payload = data.get(MUTATION_ROOTS[operation])
+    if not isinstance(payload, dict):
+        raise MonarchError(f"Monarch {operation} returned no payload for the change.")
+
+    # GraphQL reports a refused write inside an HTTP 200 twice over: once at the top
+    # level, which `graphql` already raised on, and once per field down here.
+    refusal = payload_errors(payload)
+    if refusal:
+        raise MonarchError(f"Monarch refused the change ({operation}): {refusal}")
+    return payload
+
+
+def payload_errors(payload: dict) -> str:
+    """Join a `PayloadError`, which arrives as an object from some operations and a list from others."""
+    errors = payload.get("errors")
+    entries = errors if isinstance(errors, list) else [errors] if isinstance(errors, dict) else []
+    messages = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for field_error in entry.get("fieldErrors") or []:
+            if isinstance(field_error, dict):
+                said = "; ".join(text(one) for one in field_error.get("messages") or [])
+                messages.append(f"{text(field_error.get('field'))}: {said}")
+        if entry.get("message"):
+            messages.append(truncate(entry.get("message"), 200))
+    return "; ".join(messages)
+
+
+@dataclass
+class Change:
+    """One field of one target moving from `before` to `after`, and how to say it out loud."""
+
+    operation: str
+    target: str
+    field: str
+    before: Any
+    after: Any
+    shown_before: str = "-"
+    shown_after: str = "-"
+    label: str = "-"
+    reversible: bool = True
+    note: str = ""
+    payload: dict = dataclass_field(default_factory=dict)
+
+    def row(self) -> dict:
+        return {
+            "target": self.target or "(new)",
+            "what": self.label,
+            "field": self.field,
+            "before": self.shown_before,
+            "after": self.shown_after,
+        }
+
+    def as_record(self) -> dict:
+        return {
+            "operation": self.operation,
+            "target": self.target,
+            "field": self.field,
+            "before": self.before,
+            "after": self.after,
+            "shown_before": self.shown_before,
+            "shown_after": self.shown_after,
+            "label": self.label,
+            "reversible": self.reversible,
+            "note": self.note,
+            "payload": self.payload,
+        }
+
+    @classmethod
+    def from_record(cls, record: dict) -> "Change":
+        return cls(
+            operation=text(record.get("operation"), ""),
+            target=text(record.get("target"), ""),
+            field=text(record.get("field"), ""),
+            before=record.get("before"),
+            after=record.get("after"),
+            shown_before=text(record.get("shown_before")),
+            shown_after=text(record.get("shown_after")),
+            label=text(record.get("label")),
+            reversible=bool(record.get("reversible")),
+            note=text(record.get("note"), ""),
+            payload=record.get("payload") or {},
+        )
+
+
+def journal_dir() -> Path:
+    return state_dir() / "journal"
+
+
+def batch_id(started: float, counter: int) -> str:
+    """`20260802T143000Z-01`. Derived from the run's start, never from ambient clock reads."""
+    moment = datetime.datetime.fromtimestamp(started, datetime.timezone.utc)
+    return f"{moment.strftime('%Y%m%dT%H%M%SZ')}-{counter:02d}"
+
+
+def next_batch_id(started: float) -> str:
+    directory = journal_dir()
+    for counter in range(1, 100):
+        candidate = batch_id(started, counter)
+        if not (directory / f"{candidate}.json").exists():
+            return candidate
+    raise MonarchError("The undo journal already holds 99 batches for this second.")
+
+
+def journal_batch(batch: str, profile: Profile, changes: list, started: float,
+                  state: str = "applied") -> str:
+    """Record what landed, at 0600 in a 0700 directory. Ids, names, and amounts — no secrets."""
+    write_private_json(
+        journal_dir() / f"{batch}.json",
+        {
+            "batch": batch,
+            "profile": profile.name,
+            "when": datetime.datetime.fromtimestamp(started, datetime.timezone.utc)
+            .strftime("%Y-%m-%d %H:%M:%SZ"),
+            "state": state,
+            "changes": [change.as_record() for change in changes],
+        },
+    )
+    return batch
+
+
+def read_batch(batch: str) -> dict:
+    path = journal_dir() / f"{batch}.json"
+    if not path.is_file():
+        raise MonarchError(f"No undo batch {batch!r} in {journal_dir()}. Run `undo --list`.")
+    record = read_json(path)
+    if not record:
+        raise MonarchError(f"Undo batch {batch!r} is unreadable.")
+    return record
+
+
+def list_batches() -> list[dict]:
+    try:
+        paths = sorted(journal_dir().glob("*.json"), reverse=True)
+    except OSError:
+        return []
+    records = [read_json(path) for path in paths]
+    return [record for record in records if record.get("batch")]
+
+
+def same_value(current: Any, wanted: Any) -> bool:
+    """Compare a read-back with what was written, tolerating tag order and number shape."""
+    if isinstance(current, (list, tuple)) or isinstance(wanted, (list, tuple)):
+        return (sorted(str(item) for item in current or [])
+                == sorted(str(item) for item in wanted or []))
+    if isinstance(current, (int, float, Decimal)) and isinstance(wanted, (int, float, Decimal)):
+        return to_decimal(current) == to_decimal(wanted)
+    return ("" if current is None else str(current)) == ("" if wanted is None else str(wanted))
+
+
+def refuse_over_cap(count: int, cap: int, action: str, what: str) -> None:
+    """A bulk mistake is refused whether or not it was confirmed, and as early as it is known."""
+    if count > cap:
+        raise MonarchError(
+            f"Refusing to {action}: {count} {what} exceed the bulk cap of {cap}. "
+            "Narrow the selection, or raise the cap for this one run with --max."
+        )
+
+
+def apply_changes(profile: Profile, changes: list, *, confirm: bool, cap: int,
+                  started: float, action: str) -> int:
+    """The one path every write takes: preview, cap, apply, journal, read back."""
+    print(f"action\t{action}")
+    print(f"profile\t{profile.name}")
+    print(f"changes\t{len(changes)}")
+
+    if not changes:
+        print("mode\tno-op")
+        print("next\tEvery target already holds the requested value; nothing to send.")
+        return 0
+
+    refuse_over_cap(len(changes), cap, action, "changes")
+    print_csv(CHANGE_COLUMNS, [change.row() for change in changes])
+    for change in changes:
+        if not change.reversible:
+            print(f"warning: {change.note}", file=sys.stderr)
+
+    if not confirm:
+        print("mode\tdry-run")
+        print("next\tNothing was sent. Re-run with --confirm to apply exactly the rows above.")
+        return 0
+
+    batch = next_batch_id(started)
+    print("mode\tconfirmed")
+    print(f"batch\t{batch}")
+
+    applied: list = []
+    for change in changes:
+        try:
+            SENDERS[change.operation](profile, change)
+        except MonarchError as exc:
+            stop_batch(batch, profile, applied, started, len(changes),
+                       f"{change.label} ({change.field}): {exc}")
+            return 1
+
+        applied.append(change)
+        journal_batch(batch, profile, applied, started)
+
+        current = VERIFIERS[change.operation](profile, change)
+        if not same_value(current, change.after):
+            stop_batch(batch, profile, applied, started, len(changes),
+                       f"{change.label} ({change.field}) read back as {text(current)!r}, "
+                       f"not {change.shown_after!r}")
+            return 1
+
+    print(f"applied\t{len(applied)}")
+    print(f"undo\tmonarch undo {batch} --confirm")
+    return 0
+
+
+def stop_batch(batch: str, profile: Profile, applied: list, started: float,
+               total: int, why: str) -> None:
+    """Halt a part-done batch loudly, leaving the journal able to reverse what did land."""
+    if applied:
+        journal_batch(batch, profile, applied, started)
+    print(f"error: stopped after {len(applied)} of {total} changes — {why}", file=sys.stderr)
+    if applied:
+        print(
+            f"note: {len(applied)} change(s) did land and are journalled as {batch}; "
+            f"reverse them with `monarch undo {batch} --confirm`.",
+            file=sys.stderr,
+        )
+
+
 def match_one(candidates: list[dict], key: str, wanted: str, what: str) -> dict:
     """Resolve a user-supplied name to exactly one record, refusing to guess."""
     needle = wanted.strip().casefold()
@@ -1027,6 +1455,7 @@ def transaction_row(item: dict) -> dict:
     category = item.get("category") or {}
     account = item.get("account") or {}
     return {
+        "id": text(item.get("id")),
         "date": text(item.get("date")),
         "merchant": truncate(merchant.get("name"), 40),
         "category": truncate(category.get("name"), 30),
@@ -1243,6 +1672,643 @@ def holding_row(node: dict) -> dict:
     }
 
 
+def fetch_transaction(profile: Profile, transaction_id: str) -> dict:
+    data = graphql(
+        profile,
+        "GetTransactionDrawer",
+        QUERY_TRANSACTION,
+        {"id": transaction_id, "redirectPosted": True},
+    )
+    item = data.get("getTransaction")
+    if not isinstance(item, dict) or not item.get("id"):
+        raise MonarchError(
+            f"No transaction {transaction_id!r} in this household. Run `transactions` and "
+            "copy an id from its first column."
+        )
+    return item
+
+
+def fetch_category_groups(profile: Profile) -> list[dict]:
+    data = graphql(profile, "ManageGetCategoryGroups", QUERY_CATEGORY_GROUPS)
+    groups = data.get("categoryGroups")
+    return [item for item in groups if isinstance(item, dict)] if isinstance(groups, list) else []
+
+
+def fetch_tags(profile: Profile) -> list[dict]:
+    data = graphql(profile, "GetHouseholdTransactionTags", QUERY_TAGS, {"search": "", "limit": 500})
+    tags = data.get("householdTransactionTags")
+    return [item for item in tags if isinstance(item, dict)] if isinstance(tags, list) else []
+
+
+def fetch_rules(profile: Profile) -> list[dict]:
+    data = graphql(profile, "GetTransactionRules", QUERY_RULES)
+    rules = data.get("transactionRules")
+    return [item for item in rules if isinstance(item, dict)] if isinstance(rules, list) else []
+
+
+def budget_amount(profile: Profile, category_id: str, first: datetime.date) -> Decimal:
+    """The planned amount for one category-month. An unbudgeted category reads as zero."""
+    start, end = month_bounds(first)
+    data = graphql(
+        profile, "Common_GetJointPlanningData", QUERY_BUDGETS, {"startDate": start, "endDate": end}
+    )
+    entries = ((data.get("budgetData") or {}).get("monthlyAmountsByCategory")) or []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        if str((entry.get("category") or {}).get("id") or "") != category_id:
+            continue
+        for amount in entry.get("monthlyAmounts") or []:
+            if isinstance(amount, dict) and str(amount.get("month") or "")[:7] == start[:7]:
+                return to_decimal(amount.get("plannedCashFlowAmount"))
+    return Decimal(0)
+
+
+def transaction_field(item: dict, field: str) -> str:
+    """The wire value of one editable field: a category id, a merchant name, or the note."""
+    if field == "category":
+        return str((item.get("category") or {}).get("id") or "")
+    if field == "merchant":
+        return str((item.get("merchant") or {}).get("name") or "")
+    return str(item.get("notes") or "")
+
+
+def shown_transaction_field(item: dict, field: str) -> str:
+    if field == "category":
+        return truncate((item.get("category") or {}).get("name"), 30)
+    if field == "merchant":
+        return truncate((item.get("merchant") or {}).get("name"), 40)
+    return truncate(item.get("notes"), 40)
+
+
+def transaction_label(item: dict) -> str:
+    return f"{text(item.get('date'))} {truncate((item.get('merchant') or {}).get('name'), 30)}"
+
+
+def tag_names(ids: list, names: dict) -> str:
+    return " ".join(names.get(str(one), str(one)) for one in ids) if ids else "(none)"
+
+
+def send_transaction_field(profile: Profile, change: Change) -> None:
+    """Send exactly one field. The input is built by name lookup, so no fourth field exists."""
+    key = TRANSACTION_INPUT_FIELDS[change.field]
+    mutate(profile, change.operation, {"input": {"id": change.target, key: change.after}})
+
+
+def verify_transaction_field(profile: Profile, change: Change) -> Any:
+    return transaction_field(fetch_transaction(profile, change.target), change.field)
+
+
+def send_tags(profile: Profile, change: Change) -> None:
+    mutate(
+        profile,
+        change.operation,
+        {"input": {"transactionId": change.target, "tagIds": list(change.after or [])}},
+    )
+
+
+def verify_tags(profile: Profile, change: Change) -> Any:
+    item = fetch_transaction(profile, change.target)
+    return [str(tag.get("id")) for tag in item.get("tags") or [] if isinstance(tag, dict)]
+
+
+def send_create_category(profile: Profile, change: Change) -> None:
+    payload = mutate(
+        profile,
+        change.operation,
+        {"input": {"group": change.payload["group"], "name": change.payload["name"],
+                   "icon": change.payload.get("icon", CATEGORY_ICON)}},
+    )
+    created = str((payload.get("category") or {}).get("id") or "")
+    if not created:
+        raise MonarchError("Monarch accepted the category but returned no id for it.")
+    change.target = created
+    change.after = created
+
+
+def verify_create_category(profile: Profile, change: Change) -> Any:
+    return next(
+        (str(item.get("id")) for item in fetch_categories(profile)
+         if str(item.get("id")) == change.target),
+        "",
+    )
+
+
+def rule_input(payload: dict) -> dict:
+    return {
+        "merchantNameCriteria": [
+            {"operator": "contains", "value": payload["merchantContains"]}
+        ],
+        "setCategoryAction": payload["categoryId"],
+        "applyToExistingTransactions": False,
+    }
+
+
+def send_create_rule(profile: Profile, change: Change) -> None:
+    """Monarch's rule mutation returns no id, so the new rule is found by diffing the list."""
+    before = {str(rule.get("id")) for rule in fetch_rules(profile)}
+    mutate(profile, change.operation, {"input": rule_input(change.payload)})
+    appeared = [rule for rule in fetch_rules(profile) if str(rule.get("id")) not in before]
+
+    if len(appeared) != 1:
+        change.reversible = False
+        change.note = (
+            f"Monarch's rule mutation returns no id and {len(appeared)} new rules appeared, "
+            "so this one cannot be identified for undo. Check `rules` and remove it by hand "
+            "if it is unwanted."
+        )
+        change.target = ""
+        change.after = None
+        return
+    change.target = str(appeared[0].get("id"))
+    change.after = change.target
+
+
+def verify_rule_present(profile: Profile, change: Change) -> Any:
+    if not change.target:
+        return ""
+    return next(
+        (str(rule.get("id")) for rule in fetch_rules(profile)
+         if str(rule.get("id")) == change.target),
+        "",
+    )
+
+
+def send_delete_rule(profile: Profile, change: Change) -> None:
+    payload = mutate(profile, change.operation, {"id": change.target})
+    # The payload can omit `deleted` on success, so only an explicit false is a failure.
+    if payload.get("deleted") is False:
+        raise MonarchError(f"Monarch declined to delete rule {change.target}.")
+
+
+def send_budget(profile: Profile, change: Change) -> None:
+    mutate(
+        profile,
+        change.operation,
+        {
+            "input": {
+                "categoryId": change.payload["categoryId"],
+                "amount": float(to_decimal(change.after)),
+                "timeframe": "month",
+                "startDate": change.payload["startDate"],
+                # Pinned: applying forward would make one command a write over unbounded months.
+                "applyToFuture": False,
+            }
+        },
+    )
+
+
+def verify_budget(profile: Profile, change: Change) -> Any:
+    return budget_amount(
+        profile,
+        change.payload["categoryId"],
+        parse_day(change.payload["startDate"], "month"),
+    )
+
+
+SENDERS: dict = {
+    "Web_TransactionDrawerUpdateTransaction": send_transaction_field,
+    "Web_SetTransactionTags": send_tags,
+    "Web_CreateCategory": send_create_category,
+    "Common_CreateTransactionRuleMutationV2": send_create_rule,
+    "Common_DeleteTransactionRule": send_delete_rule,
+    "Common_UpdateBudgetItem": send_budget,
+}
+
+VERIFIERS: dict = {
+    "Web_TransactionDrawerUpdateTransaction": verify_transaction_field,
+    "Web_SetTransactionTags": verify_tags,
+    "Web_CreateCategory": verify_create_category,
+    "Common_CreateTransactionRuleMutationV2": verify_rule_present,
+    "Common_DeleteTransactionRule": verify_rule_present,
+    "Common_UpdateBudgetItem": verify_budget,
+}
+
+
+def target_ids(given: list) -> list[str]:
+    """Ids from the command line, or `-` to read a reviewed list from stdin, one per line."""
+    collected: list[str] = []
+    for value in given or []:
+        if value == "-":
+            collected.extend(line.strip() for line in sys.stdin.read().splitlines())
+        else:
+            collected.append(str(value).strip())
+
+    unique: list[str] = []
+    for one in collected:
+        if one and one not in unique:
+            unique.append(one)
+    if not unique:
+        raise MonarchError(
+            "No transaction ids given. Pass ids from the `transactions` id column, or `-` to "
+            "read a reviewed list from stdin."
+        )
+    return unique
+
+
+def command_edit(args: argparse.Namespace) -> int:
+    profile = get_profile(selected_profile_name(args))
+    wanted = {
+        name: getattr(args, name)
+        for name in ("category", "merchant", "note")
+        if getattr(args, name) is not None
+    }
+    if not wanted:
+        raise MonarchError(
+            "edit changes nothing without --category, --merchant, or --note. It cannot change "
+            "an amount, a date, an account, or a pending state at all."
+        )
+
+    category_id = category_name = ""
+    if "category" in wanted:
+        chosen = match_one(fetch_categories(profile), "name", args.category, "Category")
+        category_id, category_name = str(chosen.get("id")), truncate(chosen.get("name"), 30)
+
+    # Capped here as well as in `apply_changes`, so an oversized batch costs one message
+    # rather than one read per target.
+    wanted_ids = target_ids(args.transaction)
+    refuse_over_cap(len(wanted_ids), args.max, "edit transactions", "transactions")
+
+    changes = []
+    for transaction_id in wanted_ids:
+        item = fetch_transaction(profile, transaction_id)
+        for name, field in (("category", "category"), ("merchant", "merchant"), ("note", "notes")):
+            if name not in wanted:
+                continue
+            after = category_id if name == "category" else wanted[name]
+            before = transaction_field(item, field)
+            if same_value(before, after):
+                continue
+            changes.append(
+                Change(
+                    operation="Web_TransactionDrawerUpdateTransaction",
+                    target=transaction_id,
+                    field=field,
+                    before=before,
+                    after=after,
+                    shown_before=shown_transaction_field(item, field),
+                    shown_after=category_name if name == "category" else truncate(after, 40),
+                    label=transaction_label(item),
+                )
+            )
+
+    return apply_changes(
+        profile, changes, confirm=args.confirm, cap=args.max, started=args.started,
+        action="edit transactions",
+    )
+
+
+def command_tag(args: argparse.Namespace) -> int:
+    profile = get_profile(selected_profile_name(args))
+    if not args.add and not args.remove:
+        raise MonarchError("tag changes nothing without --add or --remove.")
+
+    tags = fetch_tags(profile)
+    names = {str(tag.get("id")): text(tag.get("name")) for tag in tags}
+    adding = [str(match_one(tags, "name", one, "Tag").get("id")) for one in args.add or []]
+    removing = {str(match_one(tags, "name", one, "Tag").get("id")) for one in args.remove or []}
+
+    wanted_ids = target_ids(args.transaction)
+    refuse_over_cap(len(wanted_ids), args.max, "set transaction tags", "transactions")
+
+    changes = []
+    for transaction_id in wanted_ids:
+        item = fetch_transaction(profile, transaction_id)
+        before = [str(tag.get("id")) for tag in item.get("tags") or [] if isinstance(tag, dict)]
+        # `setTransactionTags` replaces the whole set, so the union is computed here rather
+        # than hoped for from the API.
+        after = [one for one in before if one not in removing]
+        after += [one for one in adding if one not in after]
+        if same_value(before, after):
+            continue
+        changes.append(
+            Change(
+                operation="Web_SetTransactionTags",
+                target=transaction_id,
+                field="tags",
+                before=before,
+                after=after,
+                shown_before=tag_names(before, names),
+                shown_after=tag_names(after, names),
+                label=transaction_label(item),
+            )
+        )
+
+    return apply_changes(
+        profile, changes, confirm=args.confirm, cap=args.max, started=args.started,
+        action="set transaction tags",
+    )
+
+
+def command_category_create(args: argparse.Namespace) -> int:
+    profile = get_profile(selected_profile_name(args))
+    group = match_one(fetch_category_groups(profile), "name", args.group, "Category group")
+    wanted = args.name.strip()
+    if not wanted:
+        raise MonarchError("--name cannot be empty.")
+    if any(str(item.get("name") or "").casefold() == wanted.casefold()
+           for item in fetch_categories(profile)):
+        raise MonarchError(f"A category named {wanted!r} already exists in this household.")
+
+    change = Change(
+        operation="Web_CreateCategory",
+        target="",
+        field="category",
+        before=None,
+        after="",
+        shown_before="(none)",
+        shown_after=f"{truncate(group.get('name'), 30)} / {truncate(wanted, 40)}",
+        label=wanted,
+        reversible=False,
+        note=(
+            f"Creating category {wanted!r} cannot be undone by this package: removing a "
+            "category reassigns every transaction filed under it, which is outside the "
+            "approved write set. `undo` will name it and leave it standing."
+        ),
+        payload={"group": str(group.get("id")), "name": wanted},
+    )
+    return apply_changes(
+        profile, [change], confirm=args.confirm, cap=args.max, started=args.started,
+        action="create a category",
+    )
+
+
+def rule_summary(rule: dict) -> str:
+    criteria = rule.get("merchantNameCriteria") or rule.get("merchantCriteria") or []
+    matches = " or ".join(
+        f"{text(one.get('operator'))} {text(one.get('value'))}"
+        for one in criteria if isinstance(one, dict)
+    )
+    return truncate(f"merchant {matches}" if matches else "other criteria", 60)
+
+
+def rule_action(rule: dict) -> str:
+    parts = []
+    category = rule.get("setCategoryAction") or {}
+    if category:
+        parts.append(f"category {text(category.get('name'))}")
+    merchant = rule.get("setMerchantAction") or {}
+    if merchant:
+        parts.append(f"merchant {text(merchant.get('name'))}")
+    for tag in rule.get("addTagsAction") or []:
+        if isinstance(tag, dict):
+            parts.append(f"tag {text(tag.get('name'))}")
+    if rule.get("setHideFromReportsAction"):
+        parts.append("hide from reports")
+    return truncate(", ".join(parts) if parts else "-", 60)
+
+
+def rule_spec(rule: dict) -> dict:
+    """The rule as `rule create` would express it, or `{}` when it is richer than that."""
+    criteria = rule.get("merchantNameCriteria") or []
+    category = rule.get("setCategoryAction") or {}
+    richer = (
+        rule.get("merchantCriteria")
+        or rule.get("amountCriteria")
+        or rule.get("accountIds")
+        or rule.get("setMerchantAction")
+        or rule.get("addTagsAction")
+        or rule.get("setHideFromReportsAction")
+        or rule.get("reviewStatusAction")
+    )
+    if richer or len(criteria) != 1 or not category:
+        return {}
+    only = criteria[0]
+    if not isinstance(only, dict) or str(only.get("operator") or "") != "contains":
+        return {}
+    return {
+        "merchantContains": text(only.get("value"), ""),
+        "categoryId": str(category.get("id") or ""),
+        "categoryName": text(category.get("name")),
+    }
+
+
+def command_rules(args: argparse.Namespace) -> int:
+    profile = get_profile(selected_profile_name(args))
+    rules = fetch_rules(profile)
+    if args.json:
+        print_json(rules)
+        return 0
+
+    rows = [
+        {
+            "id": text(rule.get("id")),
+            "matches": rule_summary(rule),
+            "sets": rule_action(rule),
+            "applied": text(rule.get("recentApplicationCount"), "0"),
+        }
+        for rule in rules
+    ]
+    shown = rows[: args.limit]
+    print_csv(RULE_COLUMNS, shown)
+    note_truncation(len(shown), len(rows), "rules")
+    return 0
+
+
+def command_rule_create(args: argparse.Namespace) -> int:
+    profile = get_profile(selected_profile_name(args))
+    chosen = match_one(fetch_categories(profile), "name", args.category, "Category")
+    matching = args.merchant_contains.strip()
+    if not matching:
+        raise MonarchError("--merchant-contains cannot be empty; that would match everything.")
+
+    change = Change(
+        operation="Common_CreateTransactionRuleMutationV2",
+        target="",
+        field="rule",
+        before=None,
+        after=None,
+        shown_before="(none)",
+        shown_after=f"merchant contains {matching} -> {truncate(chosen.get('name'), 30)}",
+        label="new rule",
+        payload={
+            "merchantContains": matching,
+            "categoryId": str(chosen.get("id")),
+            "categoryName": text(chosen.get("name")),
+        },
+    )
+    return apply_changes(
+        profile, [change], confirm=args.confirm, cap=args.max, started=args.started,
+        action="create a transaction rule",
+    )
+
+
+def command_rule_delete(args: argparse.Namespace) -> int:
+    profile = get_profile(selected_profile_name(args))
+    chosen = next((rule for rule in fetch_rules(profile) if str(rule.get("id")) == args.rule), None)
+    if chosen is None:
+        raise MonarchError(f"No transaction rule {args.rule!r}. Run `rules` for the current ids.")
+
+    spec = rule_spec(chosen)
+    change = Change(
+        operation="Common_DeleteTransactionRule",
+        target=str(chosen.get("id")),
+        field="rule",
+        before=str(chosen.get("id")),
+        after=None,
+        shown_before=f"{rule_summary(chosen)} -> {rule_action(chosen)}",
+        shown_after="(deleted)",
+        label=f"rule {text(chosen.get('id'))}",
+        reversible=bool(spec),
+        note=(
+            ""
+            if spec
+            else "This rule uses criteria or actions `rule create` cannot express, so `undo` "
+            "cannot rebuild it. Copy its definition out of `rules --json` before confirming."
+        ),
+        payload=spec,
+    )
+    return apply_changes(
+        profile, [change], confirm=args.confirm, cap=args.max, started=args.started,
+        action="delete a transaction rule",
+    )
+
+
+def command_budget_set(args: argparse.Namespace) -> int:
+    profile = get_profile(selected_profile_name(args))
+    chosen = match_one(fetch_categories(profile), "name", args.category, "Category")
+    first = parse_month(args.month)
+    category_id = str(chosen.get("id"))
+    before = budget_amount(profile, category_id, first)
+    after = parse_amount(args.amount)
+
+    changes = []
+    if before != after:
+        changes.append(
+            Change(
+                operation="Common_UpdateBudgetItem",
+                target=f"{category_id}:{first.isoformat()[:7]}",
+                field="budget",
+                before=float(before),
+                after=float(after),
+                shown_before=format_amount(before),
+                shown_after=format_amount(after),
+                label=f"{truncate(chosen.get('name'), 30)} {first.isoformat()[:7]}",
+                payload={"categoryId": category_id, "startDate": first.isoformat()},
+            )
+        )
+    return apply_changes(
+        profile, changes, confirm=args.confirm, cap=args.max, started=args.started,
+        action="set a budget amount",
+    )
+
+
+def invert(change: Change) -> Change:
+    """The change that puts a target back. A created rule is removed; a deleted one rebuilt."""
+    if change.operation == "Web_CreateCategory":
+        raise MonarchError(
+            f"Creating category {change.label!r} has no inverse here: reversing it would mean "
+            "deleting a category, which is outside this package's approved write set."
+        )
+    if change.operation == "Common_CreateTransactionRuleMutationV2":
+        return Change(
+            operation="Common_DeleteTransactionRule",
+            target=change.target,
+            field="rule",
+            before=change.target,
+            after=None,
+            shown_before=change.shown_after,
+            shown_after="(deleted)",
+            label=change.label,
+        )
+    if change.operation == "Common_DeleteTransactionRule":
+        return Change(
+            operation="Common_CreateTransactionRuleMutationV2",
+            target="",
+            field="rule",
+            before=None,
+            after=None,
+            shown_before="(deleted)",
+            shown_after=change.shown_before,
+            label=change.label,
+            payload=change.payload,
+        )
+    return Change(
+        operation=change.operation,
+        target=change.target,
+        field=change.field,
+        before=change.after,
+        after=change.before,
+        shown_before=change.shown_after,
+        shown_after=change.shown_before,
+        label=change.label,
+        payload=change.payload,
+    )
+
+
+def command_undo(args: argparse.Namespace) -> int:
+    if args.list:
+        return command_undo_list(args)
+    if not args.batch:
+        raise MonarchError("undo needs a batch id, or --list to see the ones on record.")
+
+    profile = get_profile(selected_profile_name(args))
+    record = read_batch(args.batch)
+    if str(record.get("state")) == "undone":
+        raise MonarchError(
+            f"Batch {args.batch!r} was already undone on this machine. Reapplying it would "
+            "overwrite whatever holds those values now."
+        )
+    changes = [Change.from_record(item) for item in record.get("changes") or []
+               if isinstance(item, dict)]
+    if not changes:
+        raise MonarchError(f"Batch {args.batch!r} records no changes.")
+
+    reversals, skipped = [], []
+    for change in reversed(changes):
+        if not change.reversible:
+            skipped.append((change, change.note or "not reversible by this package"))
+            continue
+        current = VERIFIERS[change.operation](profile, change)
+        if not same_value(current, change.after):
+            # Restoring here would clobber an edit made later, in the app or by a person.
+            skipped.append((change, f"changed underneath; it now reads {text(current)!r}"))
+            continue
+        reversals.append(invert(change))
+
+    for change, why in skipped:
+        print(f"warning: skipping {change.label} ({change.field}) — {why}", file=sys.stderr)
+
+    code = apply_changes(
+        profile, reversals, confirm=args.confirm, cap=args.max, started=args.started,
+        action=f"undo batch {args.batch}",
+    )
+    if code == 0 and args.confirm and not skipped:
+        # Rewritten rather than rebuilt, so the batch keeps the time it was applied.
+        record["state"] = "undone"
+        write_private_json(journal_dir() / f"{args.batch}.json", record)
+        print("state\tundone")
+    if skipped:
+        print(
+            f"error: {len(skipped)} of {len(changes)} change(s) were left standing.",
+            file=sys.stderr,
+        )
+        return 1
+    return code
+
+
+def command_undo_list(args: argparse.Namespace) -> int:
+    records = list_batches()
+    if args.json:
+        print_json(records)
+        return 0
+
+    rows = [
+        {
+            "batch": text(record.get("batch")),
+            "when": text(record.get("when")),
+            "profile": text(record.get("profile")),
+            "changes": len(record.get("changes") or []),
+            "state": text(record.get("state")),
+        }
+        for record in records
+    ]
+    shown = rows[: args.limit]
+    print_csv(BATCH_COLUMNS, shown)
+    note_truncation(len(shown), len(rows), "batches")
+    return 0
+
+
 def add_env_option(parser: argparse.ArgumentParser, suppress_defaults: bool = False) -> None:
     default = argparse.SUPPRESS if suppress_defaults else None
     parser.add_argument(
@@ -1277,10 +2343,28 @@ def add_json_option(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_write_options(parser: argparse.ArgumentParser) -> None:
+    """Every write takes the same two: an exact confirmation and the bulk cap."""
+    parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Apply the change. Without it the command prints what it would do and sends nothing.",
+    )
+    parser.add_argument(
+        "--max",
+        type=int,
+        default=DEFAULT_BULK_CAP,
+        help=f"Refuse a batch larger than this. Default {DEFAULT_BULK_CAP}.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="monarch",
-        description="Read a Monarch Money household: accounts, net worth, spending, and budgets.",
+        description=(
+            "Read a Monarch Money household, and edit categories, merchants, notes, tags, "
+            "rules, and budget amounts (writes preview until --confirm)."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent(
             """\
@@ -1294,9 +2378,20 @@ def build_parser() -> argparse.ArgumentParser:
               monarch budgets --profile household --month 2026-08
               monarch cashflow --profile household --days 30
               monarch holdings --profile household --account "Brokerage"
+              monarch edit txn-1 --category Groceries
+              monarch edit txn-1 --category Groceries --confirm
+              monarch tag txn-1 --add Reimbursable --confirm
+              monarch category create --name "Pet Care" --group Lifestyle --confirm
+              monarch rules
+              monarch rule create --merchant-contains "Example Market" --category Groceries
+              monarch budget set --category Groceries --month 2026-08 --amount 750
+              monarch undo --list
+              monarch undo 20260802T143000Z-01 --confirm
 
-            Every command reads. Nothing in this package creates, edits, or deletes a
-            transaction, budget, goal, holding, or account.
+            Every write is a preview until --confirm, is capped at 50 targets, and is
+            journalled so `undo` can put it back. No command changes an amount, a date, an
+            account, or a pending state; none deletes or splits a transaction; none deletes
+            a category.
             """
         ),
     )
@@ -1370,12 +2465,108 @@ def build_parser() -> argparse.ArgumentParser:
     add_json_option(holdings)
     holdings.set_defaults(handler=command_holdings)
 
+    edit = subparsers.add_parser(
+        "edit", help="Set a transaction's category, merchant, or note (preview unless --confirm)."
+    )
+    add_env_option(edit, suppress_defaults=True)
+    add_profile_option(edit, suppress_defaults=True)
+    edit.add_argument("transaction", nargs="+", help="Transaction ids, or `-` to read from stdin.")
+    edit.add_argument("--category", help="Category name to file these transactions under.")
+    edit.add_argument("--merchant", help="Merchant name to set.")
+    edit.add_argument("--note", help="Note to set. An empty string clears the note.")
+    add_write_options(edit)
+    edit.set_defaults(handler=command_edit)
+
+    tag = subparsers.add_parser(
+        "tag", help="Add or remove existing tags on transactions (preview unless --confirm)."
+    )
+    add_env_option(tag, suppress_defaults=True)
+    add_profile_option(tag, suppress_defaults=True)
+    tag.add_argument("transaction", nargs="+", help="Transaction ids, or `-` to read from stdin.")
+    tag.add_argument("--add", action="append", help="Existing tag to add. Repeatable.")
+    tag.add_argument("--remove", action="append", help="Existing tag to remove. Repeatable.")
+    add_write_options(tag)
+    tag.set_defaults(handler=command_tag)
+
+    category = subparsers.add_parser("category", help="Category maintenance.")
+    category_actions = category.add_subparsers(dest="category_command", required=True)
+    category_create = category_actions.add_parser(
+        "create", help="Create one category in a group (preview unless --confirm)."
+    )
+    add_env_option(category_create, suppress_defaults=True)
+    add_profile_option(category_create, suppress_defaults=True)
+    category_create.add_argument("--name", required=True, help="New category name.")
+    category_create.add_argument("--group", required=True, help="Existing category group name.")
+    add_write_options(category_create)
+    category_create.set_defaults(handler=command_category_create)
+
+    rules = subparsers.add_parser("rules", help="List the household's transaction rules.")
+    add_env_option(rules, suppress_defaults=True)
+    add_profile_option(rules, suppress_defaults=True)
+    rules.add_argument("--limit", type=int, default=100, help="Maximum rules to print.")
+    add_json_option(rules)
+    rules.set_defaults(handler=command_rules)
+
+    rule = subparsers.add_parser("rule", help="Transaction rule maintenance.")
+    rule_actions = rule.add_subparsers(dest="rule_command", required=True)
+
+    rule_create = rule_actions.add_parser(
+        "create", help="Create a merchant-to-category rule (preview unless --confirm)."
+    )
+    add_env_option(rule_create, suppress_defaults=True)
+    add_profile_option(rule_create, suppress_defaults=True)
+    rule_create.add_argument(
+        "--merchant-contains", required=True, help="Text the merchant name must contain."
+    )
+    rule_create.add_argument("--category", required=True, help="Category the rule files them under.")
+    add_write_options(rule_create)
+    rule_create.set_defaults(handler=command_rule_create)
+
+    rule_delete = rule_actions.add_parser(
+        "delete", help="Delete one transaction rule (preview unless --confirm)."
+    )
+    add_env_option(rule_delete, suppress_defaults=True)
+    add_profile_option(rule_delete, suppress_defaults=True)
+    rule_delete.add_argument("rule", help="Rule id from `rules`.")
+    add_write_options(rule_delete)
+    rule_delete.set_defaults(handler=command_rule_delete)
+
+    budget = subparsers.add_parser("budget", help="Budget maintenance.")
+    budget_actions = budget.add_subparsers(dest="budget_command", required=True)
+    budget_set = budget_actions.add_parser(
+        "set", help="Set one category's budget for one month (preview unless --confirm)."
+    )
+    add_env_option(budget_set, suppress_defaults=True)
+    add_profile_option(budget_set, suppress_defaults=True)
+    budget_set.add_argument("--category", required=True, help="Category name.")
+    budget_set.add_argument("--month", required=True, help="Budget month as YYYY-MM.")
+    budget_set.add_argument("--amount", required=True, help="Planned amount. Zero clears it.")
+    add_write_options(budget_set)
+    budget_set.set_defaults(handler=command_budget_set)
+
+    undo = subparsers.add_parser(
+        "undo", help="Reverse a journalled batch of writes (preview unless --confirm)."
+    )
+    add_env_option(undo, suppress_defaults=True)
+    add_profile_option(undo, suppress_defaults=True)
+    undo.add_argument("batch", nargs="?", help="Batch id from `undo --list`.")
+    undo.add_argument("--list", action="store_true", help="List journalled batches, newest first.")
+    undo.add_argument("--limit", type=int, default=25, help="Maximum batches to list.")
+    add_json_option(undo)
+    add_write_options(undo)
+    undo.set_defaults(handler=command_undo)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Stamped once, here, so a journal batch id comes from the run rather than from an
+    # ambient clock read buried in the write path.
+    if getattr(args, "started", None) is None:
+        args.started = time.time()
 
     load_dotenv(resolve_env_file(getattr(args, "env_file", None)))
 
