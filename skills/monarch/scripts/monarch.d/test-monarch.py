@@ -287,6 +287,63 @@ class MonarchFormattingTest(unittest.TestCase):
         self.assertEqual("", err.getvalue())
 
 
+class MonarchNameMatchingTest(unittest.TestCase):
+    """`--account` receives names this tool printed, so display and matching must agree."""
+
+    LONG = "Alex Q. Example Jr. - SEP IRA Brokerage Account"
+    SIBLING = "Alex Q. Example Jr. - SEP IRA Rollover Account"
+
+    def setUp(self) -> None:
+        self.module = load_module()
+        self.records = [
+            {"id": "acct-1", "displayName": self.LONG},
+            {"id": "acct-2", "displayName": "Joint Checking"},
+        ]
+
+    def match(self, wanted: str, records: list | None = None) -> dict:
+        return self.module.match_one(
+            self.records if records is None else records, "displayName", wanted, "Account"
+        )
+
+    def test_a_name_this_tool_shortened_still_resolves(self) -> None:
+        shortened = self.module.truncate(self.LONG, 40)
+        self.assertTrue(shortened.endswith(self.module.ELLIPSIS))
+        self.assertNotIn(shortened, self.LONG)  # the ellipsis makes it no substring
+        self.assertEqual("acct-1", self.match(shortened)["id"])
+
+    def test_a_shortened_name_matching_two_records_is_refused(self) -> None:
+        records = [
+            {"id": "acct-1", "displayName": self.LONG},
+            {"id": "acct-2", "displayName": self.SIBLING},
+        ]
+        shortened = self.module.truncate(self.LONG, 30)
+        with self.assertRaises(self.module.MonarchError) as raised:
+            self.match(shortened, records)
+        self.assertIn("--json", str(raised.exception))
+
+    def test_an_exact_name_wins_over_a_prefix(self) -> None:
+        records = [
+            {"id": "acct-1", "displayName": "Savings"},
+            {"id": "acct-2", "displayName": "Savings Overflow"},
+        ]
+        self.assertEqual("acct-1", self.match("Savings", records)["id"])
+
+    def test_substring_matching_is_unchanged(self) -> None:
+        self.assertEqual("acct-2", self.match("joint check")["id"])
+
+    def test_an_unmatched_name_still_raises(self) -> None:
+        with self.assertRaises(self.module.MonarchError):
+            self.match("Nowhere Bank")
+
+    def test_a_bare_ellipsis_does_not_match_everything(self) -> None:
+        with self.assertRaises(self.module.MonarchError):
+            self.match(self.module.ELLIPSIS)
+
+    def test_display_and_matching_share_one_ellipsis(self) -> None:
+        """Two copies of this literal is how the round trip broke the first time."""
+        self.assertTrue(self.module.truncate("x" * 50, 40).endswith(self.module.ELLIPSIS))
+
+
 class MonarchTransportTest(unittest.TestCase):
     def setUp(self) -> None:
         self.module = load_module()
@@ -884,6 +941,32 @@ class MonarchCommandTest(unittest.TestCase):
         self.assertEqual("EXBND,Example Bond Fund,100,88.00,8800.00", rows[1])
         self.assertEqual("EXIDX,Example Index Fund,12.5,200.00,2500.00", rows[2])
         self.assertIn("Household Brokerage", err)
+
+    def test_a_long_account_name_survives_the_accounts_to_holdings_round_trip(self) -> None:
+        """The exact failure found live: `accounts` shortens a name `--account` then rejects."""
+        long_name = "Alex Q. Example Jr. - SEP IRA Brokerage Account"
+        accounts = {"accounts": [{
+            "id": "acct-9", "displayName": long_name, "mask": "1234", "isAsset": True,
+            "displayBalance": 1000.0, "displayLastUpdatedAt": "2026-08-01T09:30:00Z",
+            "type": {"name": "brokerage", "display": "Investments"},
+            "subtype": {"name": "ira", "display": "IRA"},
+            "institution": {"name": "Example Brokerage"},
+        }]}
+        _, listed, _, _ = self.run_command(
+            self.module.command_accounts,
+            SimpleNamespace(profile="household", limit=50, json=False), [accounts],
+        )
+        printed = listed.strip().splitlines()[1].split(",")[3]
+        self.assertNotEqual(long_name, printed)  # it was shortened for display
+
+        empty = {"portfolio": {"aggregateHoldings": {"edges": []}}}
+        code, _, err, calls = self.run_command(
+            self.module.command_holdings,
+            SimpleNamespace(profile="household", account=printed, limit=50, json=False),
+            [accounts, empty],
+        )
+        self.assertEqual(0, code, err)
+        self.assertEqual(["acct-9"], calls[1].variables["input"]["accountIds"])
 
     def test_status_reports_auth_session_and_account_count(self) -> None:
         args = SimpleNamespace(profile="household", all_profiles=False, json=False)

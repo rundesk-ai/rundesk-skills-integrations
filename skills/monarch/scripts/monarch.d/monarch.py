@@ -65,6 +65,10 @@ USER_AGENT = "rundesk-monarch/1.0"
 TOTP_STEP = 30
 TOTP_DIGITS = 6
 
+# What `truncate` appends, and what `match_one` strips back off. One literal, because a
+# name this tool shortened for display is a name an agent will hand straight back to it.
+ELLIPSIS = "..."
+
 # Monarch reports a login challenge three different ways depending on which edge served
 # the request: an HTTP status, or an `error_code` inside an otherwise-200 body.
 MFA_ERROR_CODES = frozenset({"MFA_REQUIRED", "EMAIL_OTP_REQUIRED"})
@@ -372,9 +376,9 @@ def truncate(value: Any, limit: int = 120) -> str:
     rendered = text(value)
     if len(rendered) <= limit:
         return rendered
-    if limit <= 3:
+    if limit <= len(ELLIPSIS):
         return rendered[:limit]
-    return rendered[: limit - 3].rstrip() + "..."
+    return rendered[: limit - len(ELLIPSIS)].rstrip() + ELLIPSIS
 
 
 def format_amount(value: Any) -> str:
@@ -773,6 +777,21 @@ def match_one(candidates: list[dict], key: str, wanted: str, what: str) -> dict:
             "Rename one in Monarch, or use --json and filter by id."
         )
 
+    # Text output shortens long names, so a name read back from `accounts` or
+    # `transactions` carries this tool's own ellipsis. Substring matching can never find
+    # it — the real name continues past the cut — but what precedes the mark is a prefix.
+    stem = needle[: -len(ELLIPSIS)].rstrip() if needle.endswith(ELLIPSIS) else ""
+    if stem:
+        prefixed = [item for item in candidates
+                    if str(item.get(key) or "").casefold().startswith(stem)]
+        if len(prefixed) == 1:
+            return prefixed[0]
+        if len(prefixed) > 1:
+            raise MonarchError(
+                f"{what} name {wanted!r} was shortened for display and now matches "
+                f"{len(prefixed)} records. Use --json and filter by id."
+            )
+
     partial = [item for item in candidates if needle in str(item.get(key) or "").casefold()]
     if len(partial) == 1:
         return partial[0]
@@ -781,9 +800,10 @@ def match_one(candidates: list[dict], key: str, wanted: str, what: str) -> dict:
             f"No {what.lower()} matches {wanted!r}. "
             f"List the available names first."
         )
-    names = ", ".join(sorted(text(item.get(key)) for item in partial)[:8])
+    names = ", ".join(sorted(truncate(item.get(key), 40) for item in partial)[:8])
     raise MonarchError(
-        f"{what} name {wanted!r} is ambiguous; it matches: {names}. Pass the full name."
+        f"{what} name {wanted!r} is ambiguous; it matches: {names}. "
+        "Pass more of the name, or use --json and filter by id."
     )
 
 
