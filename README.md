@@ -1,8 +1,8 @@
 # Rundesk Integration Skills
 
 Reusable Agent Skills that package guarded service CLIs with their operating guidance and
-offline tests. This catalog currently includes Cloudflare, Confluence, Coolify, Jira, Sentry,
-and Stripe.
+offline tests. `manifest.json` is the authoritative list; the [Included skills](#included-skills)
+section below names the same set, and the catalog suite fails when the two disagree.
 
 ```sh
 rundesk skills install https://github.com/rundesk-ai/rundesk-skills-integrations
@@ -43,5 +43,10 @@ and the contract for building another integration. Maintainers use
 - `cloudflare` — zones, domains, registrar checks, and guarded DNS/domain changes.
 - `confluence` — spaces, trees, search, and page content.
 - `coolify` — servers, resources, deployments, logs, and guarded operational changes.
+- `discord` — servers, channels, threads, history, and guarded messages, replies, and reactions.
 - `jira` — projects, issues, comments, and attachment metadata.
+- `monarch` — Monarch Money accounts, net worth, transactions, budgets, cashflow, and holdings.
+  Read-only: the package has no command that can change a financial record.
 - `sentry` — projects, issue evidence, event inspection, and guarded resolution previews.
+- `stripe` — balances, revenue, payouts, subscriptions, disputes, and reports. Read-only apart
+  from creating a report artifact.

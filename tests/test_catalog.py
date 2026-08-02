@@ -53,6 +53,13 @@ class IntegrationCatalog(unittest.TestCase):
                 self.assertFalse((package / "CHANGELOG.md").exists())
                 self.assertTrue((package / "scripts" / name).is_file())
 
+    def test_readme_lists_exactly_the_declared_skills(self):
+        """A catalog that ships a skill its README never mentions is a catalog nobody trusts."""
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        listed = set(re.findall(r"(?m)^- `([a-z0-9-]+)`", readme))
+        declared = {entry["name"] for entry in self.manifest["skills"]}
+        self.assertEqual(declared, listed, "README.md and manifest.json disagree")
+
     def test_every_launcher_has_credential_free_help(self):
         clean = {key: value for key, value in os.environ.items()
                  if not key.endswith(("_TOKEN", "_API_TOKEN", "_GLOBAL_KEY"))}
