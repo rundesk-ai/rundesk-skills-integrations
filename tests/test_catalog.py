@@ -25,7 +25,8 @@ class IntegrationCatalog(unittest.TestCase):
         self.assertRegex(self.manifest["version"], r"^\d+\.\d+\.\d+$")
         declared = {entry["name"]: entry["path"] for entry in self.manifest["skills"]}
         self.assertEqual(
-            {"cloudflare", "confluence", "coolify", "jira", "sentry", "stripe"}, set(declared)
+            {"cloudflare", "confluence", "coolify", "discord", "jira", "sentry", "stripe"},
+            set(declared),
         )
         self.assertEqual(
             sorted(declared),
@@ -119,6 +120,9 @@ class IntegrationCatalog(unittest.TestCase):
             "coolify": [
                 "COOLIFY_PROFILES=demo", "COOLIFY_DEMO_BASE_URL=https://coolify.example.test",
                 "COOLIFY_DEMO_TOKEN=synthetic-token",
+            ],
+            "discord": [
+                "DISCORD_PROFILES=demo", "DISCORD_DEMO_TOKEN=synthetic-token",
             ],
             "jira": [
                 "JIRA_PROFILES=demo", "JIRA_DEMO_BASE_URL=https://example.atlassian.net",
