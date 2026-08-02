@@ -191,6 +191,12 @@ Redaction in text output: an account mask prints as its last two digits only (`Â
 profile email prints with its local part masked (`a***@example.test`). No full account number
 reaches stdout under any flag. `--json` prints the raw Monarch payload with no redaction at all.
 
+Long text is shortened for display and ends in `...` â€” an account or institution name at 40
+characters, a transaction's account at 30. **A shortened name round-trips:** `--account` and
+`--category` resolve an exact match first, then treat a trailing `...` as this tool's own mark and
+match what precedes it as a prefix, then fall back to a unique substring. A shortened form that
+fits two records is refused, naming both, and `--json` carries the untruncated values.
+
 Amounts are already in major units and print with two decimal places. **Monarch's API exposes no
 per-account currency field**, so there is no currency column; figures are in the household's own
 display currency. Dates render as `YYYY-MM-DD`, and sync timestamps as `YYYY-MM-DD HH:MM`.

@@ -42,9 +42,13 @@ a partial list as complete, and widen `--days` or `--limit` deliberately rather 
 ## Naming an account or a category
 
 `--account` and `--category` match a configured name case-insensitively, preferring an exact
-match and otherwise accepting a unique substring. An ambiguous or unmatched name **exits
-non-zero** instead of quietly querying the whole household. Run `accounts` or `categories` first
-to get the real name; a wrong account is worse than no answer.
+match, then a name this tool shortened for display, then a unique substring. An ambiguous or
+unmatched name **exits non-zero** instead of quietly querying the whole household. Run `accounts`
+or `categories` first; a wrong account is worse than no answer.
+
+Long names are shortened in text output and end in `...`. Pass one back exactly as printed —
+the ellipsis is understood. If two accounts share that shortened form the command says so and
+stops, and `--json` carries the full names.
 
 ## Reading each command
 
