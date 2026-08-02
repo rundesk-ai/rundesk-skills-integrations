@@ -110,9 +110,9 @@ it has already reversed.
 
 ## Boundaries
 
-The write surface is small on purpose, and the owner approved exactly this set on 2026-08-02:
-a transaction's category, merchant, and notes; tags; creating a category; transaction rules;
-budget amounts; and undo.
+The write surface is small on purpose, and the owner approved exactly this set: a transaction's
+category, merchant, and notes; tags; creating a category; transaction rules; budget amounts; and
+undo.
 
 **No command in this package can:**
 
