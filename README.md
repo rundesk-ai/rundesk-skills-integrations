@@ -45,8 +45,11 @@ and the contract for building another integration. Maintainers use
 - `coolify` — servers, resources, deployments, logs, and guarded operational changes.
 - `discord` — servers, channels, threads, history, and guarded messages, replies, and reactions.
 - `jira` — projects, issues, comments, and attachment metadata.
-- `monarch` — Monarch Money accounts, net worth, transactions, budgets, cashflow, and holdings.
-  Read-only: the package has no command that can change a financial record.
+- `monarch` — Monarch Money accounts, net worth, transactions, budgets, cashflow, and holdings,
+  plus guarded edits to a transaction's category, merchant, notes, and tags, category creation,
+  transaction rules, and budget amounts. Every edit is a preview until an exact `--confirm`, is
+  capped in bulk, and is reversible through the package's own undo journal. No command can change an
+  amount, a date, or an account, split a transaction, or delete a transaction or a category.
 - `sentry` — projects, issue evidence, event inspection, and guarded resolution previews.
 - `stripe` — balances, revenue, payouts, subscriptions, disputes, and reports. Read-only apart
   from creating a report artifact.
