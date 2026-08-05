@@ -65,9 +65,114 @@ class JiraModuleTest(unittest.TestCase):
             with self.assertRaises(self.module.JiraError) as error:
                 self.module.get_profile("missing")
 
-        self.assertIn("JIRA_MISSING_BASE_URL", str(error.exception))
-        self.assertIn("JIRA_MISSING_EMAIL", str(error.exception))
-        self.assertIn("JIRA_MISSING_API_TOKEN", str(error.exception))
+        message = str(error.exception)
+        self.assertIn("JIRA_BASE_URL__MISSING", message)
+        self.assertIn("JIRA_EMAIL__MISSING", message)
+        self.assertIn("JIRA_API_TOKEN__MISSING", message)
+
+    def test_missing_default_account_config_reports_the_plain_names(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.get_profile("default")
+
+        message = str(error.exception)
+        self.assertIn("JIRA_BASE_URL", message)
+        self.assertNotIn("__", message)
+
+    def test_rundesk_account_suffix_wins_over_the_legacy_profile_infix(self) -> None:
+        """Rundesk manages `<FIELD>__<ACCOUNT>`; it must outrank this repository's own form."""
+        env = {
+            "JIRA_BASE_URL__EXAMPLE": "https://rundesk.atlassian.net",
+            "JIRA_EMAIL__EXAMPLE": "managed@example.com",
+            "JIRA_API_TOKEN__EXAMPLE": "managed-token",
+            "JIRA_PROJECTS__EXAMPLE": "APP",
+            "JIRA_EXAMPLE_BASE_URL": "https://legacy.atlassian.net",
+            "JIRA_EXAMPLE_EMAIL": "legacy@example.com",
+            "JIRA_EXAMPLE_API_TOKEN": "legacy-token",
+            "JIRA_EXAMPLE_PROJECTS": "OPS",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            profile = self.module.get_profile("example")
+
+        self.assertEqual(profile.base_url, "https://rundesk.atlassian.net")
+        self.assertEqual(profile.email, "managed@example.com")
+        self.assertEqual(profile.token, "managed-token")
+        self.assertEqual(profile.projects, ["APP"])
+
+    def test_legacy_profile_infix_still_resolves_when_no_rundesk_account_exists(self) -> None:
+        env = {
+            "JIRA_EXAMPLE_TWO_BASE_URL": "https://legacy.atlassian.net",
+            "JIRA_EXAMPLE_TWO_EMAIL": "legacy@example.com",
+            "JIRA_EXAMPLE_TWO_API_TOKEN": "legacy-token",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            profile = self.module.get_profile("example-two")
+
+        self.assertEqual(profile.base_url, "https://legacy.atlassian.net")
+        self.assertEqual(profile.token, "legacy-token")
+
+    def test_named_account_never_falls_back_to_the_default_account_value(self) -> None:
+        """Pairing one site's URL with another site's token is the failure this prevents."""
+        env = {
+            "JIRA_BASE_URL": "https://default.atlassian.net",
+            "JIRA_EMAIL": "default@example.com",
+            "JIRA_API_TOKEN": "default-token",
+            "JIRA_BASE_URL__EXAMPLE": "https://example.atlassian.net",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.get_profile("example")
+
+        self.assertIn("JIRA_EMAIL__EXAMPLE", str(error.exception))
+        self.assertIn("JIRA_API_TOKEN__EXAMPLE", str(error.exception))
+        self.assertNotIn("default-token", str(error.exception))
+
+    def test_plain_names_alone_configure_one_default_account(self) -> None:
+        env = {
+            "JIRA_BASE_URL": "https://example.atlassian.net",
+            "JIRA_EMAIL": "alex@example.com",
+            "JIRA_API_TOKEN": "secret",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["default"], self.module.configured_profile_names())
+            profile = self.module.get_profile("default")
+
+        self.assertEqual(profile.base_url, "https://example.atlassian.net")
+        self.assertEqual(profile.token, "secret")
+
+    def test_accounts_are_discovered_from_both_spellings_without_a_declaration(self) -> None:
+        env = {
+            "JIRA_API_TOKEN__ACME": "acme-token",
+            "JIRA_BASE_URL__ACME_TWO": "https://acme-two.atlassian.net",
+            "JIRA_LEGACY_API_TOKEN": "legacy-token",
+            "JIRA_ENV_FILE": "/dev/null",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(
+                ["acme", "acme-two", "legacy"], self.module.configured_profile_names()
+            )
+
+    def test_explicit_profiles_variable_overrides_discovery(self) -> None:
+        env = {
+            "JIRA_PROFILES": "example",
+            "JIRA_API_TOKEN__ACME": "acme-token",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["example"], self.module.configured_profile_names())
+
+    def test_default_profile_variable_names_the_account_holding_the_plain_values(self) -> None:
+        env = {
+            "JIRA_DEFAULT_PROFILE": "example",
+            "JIRA_BASE_URL": "https://example.atlassian.net",
+            "JIRA_EMAIL": "alex@example.com",
+            "JIRA_API_TOKEN": "secret",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            profile = self.module.get_profile("example")
+            with self.assertRaises(self.module.JiraError):
+                self.module.get_profile("other")
+
+        self.assertEqual(profile.token, "secret")
 
     def test_profile_rejects_non_https_or_non_origin_base_urls(self) -> None:
         for base_url in (

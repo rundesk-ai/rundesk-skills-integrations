@@ -67,7 +67,28 @@ Registrar list/register needs Registrar-related permissions (or Global API Key).
 
 Keep real tokens in the owner-only secrets dotenv (mode `600`). Never commit them. Never put them under `~/.rundesk/data/scripts` or skills.
 
-Recommended local keys:
+Required (the only key `rundesk.json` declares): `CLOUDFLARE_API_TOKEN`. Optional per account: `CLOUDFLARE_ACCOUNT_ID` (resolved from the API when exactly one account is visible), `CLOUDFLARE_LABEL`, and the `CLOUDFLARE_EMAIL` + `CLOUDFLARE_GLOBAL_KEY` pair for the Registrar calls a token cannot make.
+
+Two spellings resolve. For one field of one account, highest precedence first:
+
+1. `CLOUDFLARE_<FIELD>__<ACCOUNT>` — the Rundesk-managed form, written by `rundesk skills configure`. Rundesk finds accounts by scanning this suffix, so a new account needs no declaration.
+2. `CLOUDFLARE_<PROFILE>_<FIELD>` — this repository's older form, in a dotenv this command reads by hand.
+3. the plain `CLOUDFLARE_<FIELD>` — the **default account only**.
+
+The plain name is the default account. A named account never falls back to a plain value, so one account's token is never paired with another account's id; a named account missing a key reports the Rundesk spelling, such as `CLOUDFLARE_API_TOKEN__EXAMPLE`. The default account is the profile named `default`, an empty profile, or whatever `CLOUDFLARE_DEFAULT_PROFILE` names.
+
+Rundesk-managed keys:
+
+```dotenv
+CLOUDFLARE_API_TOKEN=
+CLOUDFLARE_ACCOUNT_ID=
+
+CLOUDFLARE_API_TOKEN__EXAMPLE=
+CLOUDFLARE_ACCOUNT_ID__EXAMPLE=
+CLOUDFLARE_LABEL__EXAMPLE=Example Cloudflare
+```
+
+Older per-profile keys, still read unchanged:
 
 ```dotenv
 CLOUDFLARE_PROFILES=example
@@ -94,7 +115,11 @@ CLOUDFLARE_EXAMPLE_ACCOUNT_ID=
 # CLOUDFLARE_EXAMPLE_CONTACT_EMAIL=
 ```
 
-Compatibility keys: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_EMAIL`, `CLOUDFLARE_GLOBAL_KEY`.
+Legacy bare aliases, read for the default account only: `CF_API_TOKEN` for `CLOUDFLARE_API_TOKEN`, and `CLOUDFLARE_API_KEY` for `CLOUDFLARE_GLOBAL_KEY`.
+
+The registrant contact keys resolve through both spellings too — `CLOUDFLARE_CONTACT_EMAIL__EXAMPLE`, `CLOUDFLARE_EXAMPLE_CONTACT_EMAIL`, or the plain `CLOUDFLARE_CONTACT_EMAIL` for the default account. `rundesk.json` does not declare them, because only a confirmed `register` reads them.
+
+`api` and `contact` cannot be account names in the older `CLOUDFLARE_<PROFILE>_<FIELD>` form, because `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_CONTACT_EMAIL` are field names in their own right. Name such an account with `CLOUDFLARE_API_TOKEN__CONTACT`, or list it in `CLOUDFLARE_PROFILES`.
 
 Credential search order: process env → `--env-file` → `CLOUDFLARE_ENV_FILE` →
 `RUNDESK_INTEGRATIONS_ENV` → `~/.config/rundesk/integrations/cloudflare/env` → legacy

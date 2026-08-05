@@ -1,0 +1,5 @@
+{
+  "needs": {
+    "CLOUDFLARE_API_TOKEN": "a Cloudflare API token from dash.cloudflare.com, under My Profile > API Tokens > Create Token; give it at least Zone:Read and Zone:DNS:Edit for the zones you want this skill to manage. Use an API token, not the Global API Key."
+  }
+}

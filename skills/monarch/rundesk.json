@@ -1,0 +1,6 @@
+{
+  "needs": {
+    "MONARCH_EMAIL": "the email address you sign in to app.monarchmoney.com with",
+    "MONARCH_PASSWORD": "the password for that Monarch Money account; Monarch publishes no API key, so the sign-in credential is the only credential there is. If the account uses an authenticator app, also set MONARCH_MFA_SECRET to the TOTP secret from Settings > Security."
+  }
+}

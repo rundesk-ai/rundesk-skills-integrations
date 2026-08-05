@@ -1,0 +1,6 @@
+{
+  "needs": {
+    "SENTRY_AUTH_TOKEN": "a Sentry auth token from sentry.io, under Settings > Developer Settings > Personal Tokens (or an organization auth token), with the project, event, and issue read scopes",
+    "SENTRY_ORG": "your Sentry organization slug - the segment after /organizations/ in the dashboard URL, or Settings > General > Organization Slug"
+  }
+}

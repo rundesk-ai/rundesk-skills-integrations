@@ -16,9 +16,10 @@ Usage:
   stripe report run --type balance.summary.1 --start 2026-07-01 --end 2026-08-01
 
 Inputs:
-  Reads process env or an explicit/shared/isolated dotenv. Configure STRIPE_PROFILES
-  and STRIPE_<PROFILE>_* keys; see references/cli.md for setup. Secrets must stay in an
-  owner-only environment file.
+  Reads process env or an explicit/shared/isolated dotenv. Rundesk-managed accounts use
+  STRIPE_<FIELD>__<PROFILE>, with the plain STRIPE_<FIELD> as the default account; the
+  older STRIPE_<PROFILE>_<FIELD> keys still resolve. See references/cli.md for setup.
+  Secrets must stay in an owner-only environment file.
 
 Outputs:
   Writes compact text summaries to stdout. List output is CSV-style rows and monetary
@@ -87,10 +88,6 @@ EMAIL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 IP_CANDIDATE_PATTERN = re.compile(r"(?<![0-9A-Fa-f:.])\[?[0-9A-Fa-f:.]+\]?(?![0-9A-Fa-f:.])")
-
-# A profile named `api` or `secret` would be indistinguishable from the conventional
-# STRIPE_API_KEY / STRIPE_SECRET_KEY single-account variables during discovery.
-RESERVED_PROFILE_WORDS = frozenset({"API", "SECRET", "DEFAULT"})
 
 
 def default_env_candidates() -> list[Path]:
@@ -181,9 +178,76 @@ def load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
+# Each plain variable name Rundesk manages, paired with the per-profile suffix this
+# repository has always used, so both spellings resolve to the same field. The keys are
+# exactly the names declared in rundesk.json plus the optional ones a command only uses
+# when present.
+PROFILE_FIELDS = {
+    "STRIPE_API_KEY": "KEY",
+    "STRIPE_ACCOUNT": "ACCOUNT",
+    "STRIPE_API_VERSION": "API_VERSION",
+    "STRIPE_LABEL": "LABEL",
+}
+REQUIRED_FIELDS = ("STRIPE_API_KEY",)
+# Bare names an older dotenv may still use for the single default account.
+PLAIN_ALIASES = {"STRIPE_API_KEY": ("STRIPE_SECRET_KEY",)}
+# A Rundesk account suffix: uppercase words joined by single underscores, because a
+# double underscore is what separates the field name from the account name.
+ACCOUNT_SUFFIX_RE = re.compile(r"[A-Z0-9]+(?:_[A-Z0-9]+)*")
+# A profile named `api` or `secret` would be indistinguishable from the conventional
+# STRIPE_API_KEY / STRIPE_SECRET_KEY single-account variables during discovery, and
+# `default` and `env` name the default account and the STRIPE_ENV_FILE setting.
+RESERVED_PROFILE_WORDS = frozenset({"API", "SECRET", "DEFAULT", "ENV"})
+
+
+def normalize_profile(profile: str) -> str:
+    """A profile name as an environment-variable fragment: `platform-sub` to `PLATFORM_SUB`."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", profile or "").strip("_").upper()
+
+
+def profile_label(suffix: str) -> str:
+    """The inverse of `normalize_profile`, so a discovered account reads as a profile name."""
+    return suffix.lower().replace("_", "-")
+
+
 def env_name(profile: str, suffix: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9]+", "_", profile).strip("_").upper()
-    return f"STRIPE_{normalized}_{suffix}"
+    return f"STRIPE_{normalize_profile(profile)}_{suffix}"
+
+
+def is_default_profile(profile: str) -> bool:
+    """Rundesk stores the default account under the plain, unsuffixed variable names."""
+    normalized = normalize_profile(profile)
+    if not normalized or normalized == "DEFAULT":
+        return True
+    return normalized == normalize_profile(os.environ.get("STRIPE_DEFAULT_PROFILE", ""))
+
+
+def missing_name(profile: str, field: str) -> str:
+    """The variable an owner must set, spelled the way Rundesk stores it."""
+    return field if is_default_profile(profile) else f"{field}__{normalize_profile(profile)}"
+
+
+def profile_value(profile: str, field: str) -> str:
+    """Read one field for one profile.
+
+    Rundesk's `<FIELD>__<PROFILE>` wins, then this repository's `STRIPE_<PROFILE>_<FIELD>`,
+    then the plain `<FIELD>` and its legacy aliases — which belong to the default account
+    only, so a named account never pairs one business's key with another's connected
+    account id.
+    """
+    normalized = normalize_profile(profile)
+    if normalized:
+        for name in (f"{field}__{normalized}", env_name(profile, PROFILE_FIELDS[field])):
+            value = os.environ.get(name, "")
+            if value:
+                return value
+    if not is_default_profile(profile):
+        return ""
+    for name in (field, *PLAIN_ALIASES.get(field, ())):
+        value = os.environ.get(name, "")
+        if value:
+            return value
+    return ""
 
 
 def split_csv(value: str | None) -> list[str]:
@@ -202,16 +266,46 @@ def configured_profile_names() -> list[str]:
 
 
 def discovered_profile_names() -> list[str]:
-    names = set()
-    pattern = re.compile(r"^STRIPE_([A-Z0-9_]+)_(KEY|ACCOUNT|LABEL|API_VERSION)$")
+    """Accounts present in the environment, so adding one needs no declaration.
+
+    Both spellings are scanned: Rundesk's `<FIELD>__<ACCOUNT>` suffix and this
+    repository's `STRIPE_<PROFILE>_<FIELD>` infix.
+
+    The plain names are one more account — the default one — listed even when only
+    partly configured, so it carries its own error instead of vanishing. It is
+    suppressed when the infix spelling is in use: there a plain value was a fallback
+    shared by every profile, not an account of its own, and inventing one would make
+    every command ambiguous for an owner whose dotenv predates Rundesk.
+    """
+    suffixed: set[str] = set()
+    infixed: set[str] = set()
+    legacy = re.compile(
+        rf"^STRIPE_({ACCOUNT_SUFFIX_RE.pattern})_({'|'.join(PROFILE_FIELDS.values())})$"
+    )
     for key in os.environ:
-        match = pattern.match(key)
+        for field in PROFILE_FIELDS:
+            prefix = f"{field}__"
+            if key.startswith(prefix) and ACCOUNT_SUFFIX_RE.fullmatch(key[len(prefix):]):
+                suffixed.add(profile_label(key[len(prefix):]))
+        match = legacy.match(key)
         if not match:
             continue
-        raw_name = match.group(1)
-        if raw_name in RESERVED_PROFILE_WORDS:
-            continue
-        names.add(raw_name.lower().replace("_", "-"))
+        word = match.group(1)
+        if word == "DEFAULT":
+            # `<SKILL>_DEFAULT_<FIELD>` is the infix spelling of the default account, not
+            # an account named `default` that resolution would then never find.
+            infixed.add("default")
+        elif word not in RESERVED_PROFILE_WORDS:
+            infixed.add(profile_label(word))
+    # A plain name, or its legacy alias, configures the default account. List it even when
+    # only some fields are set, so a partly configured default carries its own error
+    # instead of vanishing from `profiles`.
+    names = suffixed | infixed
+    # The plain names are the default account. The infix spelling predates that idea and
+    # treated a plain value as a fallback shared by every profile, so an environment
+    # written that way gets no invented `default` account to make selection ambiguous.
+    if not infixed and any(profile_value("", field) for field in REQUIRED_FIELDS):
+        names.add(os.environ.get("STRIPE_DEFAULT_PROFILE") or "default")
     return sorted(names)
 
 
@@ -237,24 +331,19 @@ def validate_key(name: str, key: str) -> str:
 
 
 def get_profile(name: str) -> Profile:
-    key = (
-        os.environ.get(env_name(name, "KEY"))
-        or os.environ.get("STRIPE_API_KEY")
-        or os.environ.get("STRIPE_SECRET_KEY")
-        or ""
-    )
+    key = profile_value(name, "STRIPE_API_KEY")
     if not key:
         raise StripeError(
-            f"Missing Stripe config: {env_name(name, 'KEY')}. "
-            "Add it to the integration dotenv or export it in the shell."
+            f"Missing Stripe config: {missing_name(name, 'STRIPE_API_KEY')}. "
+            "Run `rundesk skills configure`, add it to the secrets dotenv, or export it in the shell."
         )
 
     return Profile(
         name=name,
         key=validate_key(name, key),
-        account=validate_account(os.environ.get(env_name(name, "ACCOUNT"), "").strip()),
-        label=os.environ.get(env_name(name, "LABEL"), name),
-        api_version=os.environ.get(env_name(name, "API_VERSION"), "").strip(),
+        account=validate_account(profile_value(name, "STRIPE_ACCOUNT").strip()),
+        label=profile_value(name, "STRIPE_LABEL") or name,
+        api_version=profile_value(name, "STRIPE_API_VERSION").strip(),
     )
 
 
@@ -278,7 +367,8 @@ def selected_profiles(args: argparse.Namespace) -> list[Profile]:
         names = configured_profile_names()
         if not names:
             raise StripeError(
-                "No Stripe profiles configured. Set STRIPE_PROFILES or STRIPE_DEFAULT_PROFILE."
+                "No Stripe profiles configured. Run `rundesk skills configure`, or set "
+                "STRIPE_PROFILES and STRIPE_DEFAULT_PROFILE in .env."
             )
         return [get_profile(name) for name in names]
     return [get_profile(selected_profile_name(args))]
@@ -518,7 +608,10 @@ def note_truncation(truncated: bool, limit: int, what: str) -> None:
 def command_profiles(args: argparse.Namespace) -> int:
     names = configured_profile_names()
     if not names:
-        print("No Stripe profiles configured. Set STRIPE_PROFILES or STRIPE_DEFAULT_PROFILE.")
+        print(
+            "No Stripe profiles configured. Run `rundesk skills configure`, or set "
+            "STRIPE_PROFILES and STRIPE_DEFAULT_PROFILE in .env."
+        )
         return 0
 
     print("Stripe profiles")
@@ -1021,7 +1114,7 @@ def add_profile_option(parser: argparse.ArgumentParser, suppress_defaults: bool 
     parser.add_argument(
         "--profile",
         default=default,
-        help="Stripe profile name from STRIPE_<PROFILE>_* env vars.",
+        help="Stripe account name, from STRIPE_<FIELD>__<PROFILE> or STRIPE_<PROFILE>_<FIELD> env vars.",
     )
 
 

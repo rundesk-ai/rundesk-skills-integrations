@@ -21,10 +21,12 @@ Usage:
   discord thread CHANNEL_ID --name "..." [--message MESSAGE_ID] [--confirm]
 
 Inputs:
-  Reads a dotenv outside the Rundesk skill library. Configure DISCORD_PROFILES and
-  DISCORD_<PROFILE>_TOKEN, or a single DISCORD_BOT_TOKEN. Optional per-profile
-  ALLOW_GUILDS / ALLOW_CHANNELS / ALLOW_USERS lists bound where writes may land.
-  Secrets stay in the local dotenv only.
+  Reads process env or an explicit/shared/isolated dotenv. Rundesk-managed accounts use
+  DISCORD_<FIELD>__<PROFILE>, with the plain DISCORD_<FIELD> as the default account; the
+  older DISCORD_<PROFILE>_<FIELD> keys still resolve. Optional ALLOW_GUILDS /
+  ALLOW_CHANNELS / ALLOW_USERS lists bound where writes may land, and an unprefixed list
+  bounds every account. See references/cli.md. Secrets must stay in the process
+  environment or a local dotenv only.
 
 Outputs:
   Compact text / CSV for agent context. --json for structured payloads.
@@ -113,7 +115,7 @@ class Profile:
     def auth_headers(self) -> dict[str, str]:
         if not self.token:
             raise DiscordError(
-                f"Profile {self.name!r} missing {env_name(self.name, 'TOKEN')}."
+                f"Profile {self.name!r} missing {missing_name(self.name, 'DISCORD_BOT_TOKEN')}."
             )
         # A bot credential is `Bot <token>`, never `Bearer <token>`: Discord answers a
         # Bearer-prefixed bot token with 401 and no hint about the prefix.
@@ -147,9 +149,81 @@ def load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
+# Each plain variable name Rundesk manages, paired with the per-profile suffix this
+# repository has always used, so both spellings resolve to the same field. The keys are
+# exactly the names declared in rundesk.json plus the optional ones a command only uses
+# when present.
+PROFILE_FIELDS = {
+    "DISCORD_BOT_TOKEN": "TOKEN",
+    "DISCORD_LABEL": "LABEL",
+    "DISCORD_ALLOW_GUILDS": "ALLOW_GUILDS",
+    "DISCORD_ALLOW_CHANNELS": "ALLOW_CHANNELS",
+    "DISCORD_ALLOW_USERS": "ALLOW_USERS",
+}
+REQUIRED_FIELDS = ("DISCORD_BOT_TOKEN",)
+# Bare names an older dotenv may still use for the default account. DISCORD_TOKEN is also
+# what a Rundesk Discord *channel* reads, so an install that exports it for the gateway
+# hands the same identity to this command.
+PLAIN_ALIASES = {"DISCORD_BOT_TOKEN": ("DISCORD_TOKEN",)}
+# A guardrail must never narrow: the plain allow-lists bound every account, not just the
+# default one, so adding an account can never silently unbound it.
+GLOBAL_PLAIN_FIELDS = frozenset({"DISCORD_ALLOW_GUILDS", "DISCORD_ALLOW_CHANNELS", "DISCORD_ALLOW_USERS"})
+# A Rundesk account suffix: uppercase words joined by single underscores, because a
+# double underscore is what separates the field name from the account name.
+ACCOUNT_SUFFIX_RE = re.compile(r"[A-Z0-9]+(?:_[A-Z0-9]+)*")
+# BOT and API keep DISCORD_BOT_TOKEN and DISCORD_API_* from reading as an account name.
+RESERVED_PROFILE_WORDS = frozenset({"DEFAULT", "BOT", "API", "ENV"})
+
+
+def normalize_profile(profile: str) -> str:
+    """A profile name as an environment-variable fragment: `example-two` to `EXAMPLE_TWO`."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", profile or "").strip("_").upper()
+
+
+def profile_label(suffix: str) -> str:
+    """The inverse of `normalize_profile`, so a discovered account reads as a profile name."""
+    return suffix.lower().replace("_", "-")
+
+
 def env_name(profile: str, suffix: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9]+", "_", profile).strip("_").upper()
-    return f"DISCORD_{normalized}_{suffix}"
+    return f"DISCORD_{normalize_profile(profile)}_{suffix}"
+
+
+def is_default_profile(profile: str) -> bool:
+    """Rundesk stores the default account under the plain, unsuffixed variable names."""
+    normalized = normalize_profile(profile)
+    if not normalized or normalized == "DEFAULT":
+        return True
+    return normalized == normalize_profile(os.environ.get("DISCORD_DEFAULT_PROFILE", ""))
+
+
+def missing_name(profile: str, field: str) -> str:
+    """The variable an owner must set, spelled the way Rundesk stores it."""
+    return field if is_default_profile(profile) else f"{field}__{normalize_profile(profile)}"
+
+
+def profile_value(profile: str, field: str) -> str:
+    """Read one field for one profile.
+
+    Rundesk's `<FIELD>__<PROFILE>` wins, then this repository's `DISCORD_<PROFILE>_<FIELD>`,
+    then the plain `<FIELD>` and any legacy bare alias — which belong to the default account
+    only, so a named account never borrows another bot's token. The exception is a field in
+    `GLOBAL_PLAIN_FIELDS`: a plain guardrail list bounds every account, because narrowing it
+    to the default account would silently unbound every named one.
+    """
+    normalized = normalize_profile(profile)
+    if normalized:
+        for name in (f"{field}__{normalized}", env_name(profile, PROFILE_FIELDS[field])):
+            value = os.environ.get(name, "")
+            if value:
+                return value
+    if field not in GLOBAL_PLAIN_FIELDS and not is_default_profile(profile):
+        return ""
+    for name in (field, *PLAIN_ALIASES.get(field, ())):
+        value = os.environ.get(name, "")
+        if value:
+            return value
+    return ""
 
 
 def split_csv(value: str | None) -> list[str]:
@@ -167,51 +241,65 @@ def configured_profile_names() -> list[str]:
 
 
 def discovered_profile_names() -> list[str]:
-    names: set[str] = set()
-    pattern = re.compile(
-        r"^DISCORD_([A-Z0-9_]+)_(TOKEN|LABEL|ALLOW_GUILDS|ALLOW_CHANNELS|ALLOW_USERS)$"
+    """Accounts present in the environment, so adding one needs no declaration.
+
+    Both spellings are scanned: Rundesk's `<FIELD>__<ACCOUNT>` suffix and this
+    repository's `DISCORD_<PROFILE>_<FIELD>` infix.
+
+    The plain names are one more account — the default one — listed even when only
+    partly configured, so it carries its own error instead of vanishing. It is
+    suppressed when the infix spelling is in use: there a plain value was a fallback
+    shared by every profile, not an account of its own, and inventing one would make
+    every command ambiguous for an owner whose dotenv predates Rundesk.
+    """
+    suffixed: set[str] = set()
+    infixed: set[str] = set()
+    legacy = re.compile(
+        rf"^DISCORD_({ACCOUNT_SUFFIX_RE.pattern})_({'|'.join(PROFILE_FIELDS.values())})$"
     )
     for key in os.environ:
-        match = pattern.match(key)
+        for field in PROFILE_FIELDS:
+            prefix = f"{field}__"
+            if key.startswith(prefix) and ACCOUNT_SUFFIX_RE.fullmatch(key[len(prefix):]):
+                suffixed.add(profile_label(key[len(prefix):]))
+        match = legacy.match(key)
         if not match:
             continue
-        raw = match.group(1)
-        if raw in {"DEFAULT", "BOT", "API", "ENV"}:
-            continue
-        names.add(raw.lower().replace("_", "-"))
-    if os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("DISCORD_TOKEN"):
-        names.add(os.environ.get("DISCORD_DEFAULT_PROFILE", "default") or "default")
+        word = match.group(1)
+        if word == "DEFAULT":
+            # `<SKILL>_DEFAULT_<FIELD>` is the infix spelling of the default account, not
+            # an account named `default` that resolution would then never find.
+            infixed.add("default")
+        elif word not in RESERVED_PROFILE_WORDS:
+            infixed.add(profile_label(word))
+    names = suffixed | infixed
+    # The plain names are the default account. The infix spelling predates that idea and
+    # treated a plain value as a fallback shared by every profile, so an environment
+    # written that way gets no invented `default` account to make selection ambiguous.
+    if not infixed and any(profile_value("", field) for field in REQUIRED_FIELDS):
+        names.add(os.environ.get("DISCORD_DEFAULT_PROFILE") or "default")
     return sorted(names)
 
 
-def allow_list(name: str, suffix: str) -> tuple[str, ...]:
-    """A per-profile allowed list, falling back to the unprefixed one."""
-    raw = os.environ.get(env_name(name, suffix)) or os.environ.get(f"DISCORD_{suffix}") or ""
-    return tuple(split_csv(raw))
+def allow_list(name: str, field: str) -> tuple[str, ...]:
+    """One profile's write bounds, per account or from the plain list that bounds them all."""
+    return tuple(split_csv(profile_value(name, field)))
 
 
 def get_profile(name: str) -> Profile:
-    token = (
-        os.environ.get(env_name(name, "TOKEN"))
-        # The bare names exist so one bot needs no profile ceremony. DISCORD_TOKEN is
-        # also what a Rundesk Discord *channel* reads, so an install that exports it
-        # for the gateway hands the same identity to this command.
-        or os.environ.get("DISCORD_BOT_TOKEN")
-        or os.environ.get("DISCORD_TOKEN")
-        or ""
-    )
+    token = profile_value(name, "DISCORD_BOT_TOKEN")
     if not token:
         raise DiscordError(
-            f"Missing Discord config: {env_name(name, 'TOKEN')} (or DISCORD_BOT_TOKEN). "
-            "Add it to the integration dotenv."
+            f"Missing Discord config: {missing_name(name, 'DISCORD_BOT_TOKEN')}. "
+            "Run `rundesk skills configure`, add it to the secrets dotenv, or export it in the shell."
         )
     return Profile(
         name=name,
         token=token,
-        label=os.environ.get(env_name(name, "LABEL"), name),
-        allow_guilds=allow_list(name, "ALLOW_GUILDS"),
-        allow_channels=allow_list(name, "ALLOW_CHANNELS"),
-        allow_users=allow_list(name, "ALLOW_USERS"),
+        label=profile_value(name, "DISCORD_LABEL") or name,
+        allow_guilds=allow_list(name, "DISCORD_ALLOW_GUILDS"),
+        allow_channels=allow_list(name, "DISCORD_ALLOW_CHANNELS"),
+        allow_users=allow_list(name, "DISCORD_ALLOW_USERS"),
     )
 
 
@@ -226,8 +314,9 @@ def selected_profile_name(args: argparse.Namespace) -> str:
         return names[0]
     if not names:
         raise DiscordError(
-            "No Discord profiles configured. Set DISCORD_BOT_TOKEN, or DISCORD_PROFILES "
-            "and DISCORD_<PROFILE>_TOKEN."
+            "No Discord profiles configured. Set DISCORD_BOT_TOKEN for one bot, "
+            "DISCORD_BOT_TOKEN__<PROFILE> for a named account, or the older "
+            "DISCORD_<PROFILE>_TOKEN."
         )
     raise DiscordError(
         f"Multiple Discord profiles configured; pass --profile. Available: {', '.join(names)}"
@@ -359,7 +448,7 @@ def allow_channel(profile: Profile, channel_id: str) -> None:
         return
     if profile.allow_channels and not profile.allow_guilds:
         raise DiscordError(
-            f"Channel {channel_id} is not in {env_name(profile.name, 'ALLOW_CHANNELS')}; "
+            f"Channel {channel_id} is not in {missing_name(profile.name, 'DISCORD_ALLOW_CHANNELS')}; "
             "refusing to write there."
         )
     if profile.allow_guilds:
@@ -367,7 +456,7 @@ def allow_channel(profile: Profile, channel_id: str) -> None:
         if guild not in profile.allow_guilds:
             raise DiscordError(
                 f"Channel {channel_id} belongs to guild {guild or 'unknown'}, which is not in "
-                f"{env_name(profile.name, 'ALLOW_GUILDS')}; refusing to write there."
+                f"{missing_name(profile.name, 'DISCORD_ALLOW_GUILDS')}; refusing to write there."
             )
 
 
@@ -376,13 +465,13 @@ def allow_user(profile: Profile, user_id: str) -> None:
         return
     if profile.allow_users:
         raise DiscordError(
-            f"User {user_id} is not in {env_name(profile.name, 'ALLOW_USERS')}; "
+            f"User {user_id} is not in {missing_name(profile.name, 'DISCORD_ALLOW_USERS')}; "
             "refusing to send a direct message."
         )
     if profile.bounded:
         raise DiscordError(
             f"This profile is bounded to named guilds or channels, so a direct message needs "
-            f"{env_name(profile.name, 'ALLOW_USERS')}; refusing to message {user_id}."
+            f"{missing_name(profile.name, 'DISCORD_ALLOW_USERS')}; refusing to message {user_id}."
         )
 
 
@@ -827,7 +916,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_common(one: argparse.ArgumentParser, *, limit: int | None = None) -> None:
-        one.add_argument("--profile", default=None)
+        one.add_argument(
+            "--profile", default=None,
+            help="Discord account name, from DISCORD_<FIELD>__<PROFILE> or "
+                 "DISCORD_<PROFILE>_<FIELD> env vars.",
+        )
         one.add_argument("--json", action="store_true")
         if limit is not None:
             one.add_argument("--limit", type=int, default=limit)

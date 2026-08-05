@@ -12,9 +12,13 @@ Usage:
   confluence page PAGE_ID [--profile example] [--full] [--json]
 
 Inputs:
-  Reads process env or an explicit/shared/isolated dotenv. Reuses JIRA_<PROFILE>_*
-  Atlassian credentials and optional CONFLUENCE_<PROFILE>_SPACES mappings;
-  see the README ## Provider section and .env.example. Secrets must stay in local .env only.
+  Reads process env or an explicit/shared/isolated dotenv. Rundesk-managed accounts use
+  CONFLUENCE_<FIELD>__<PROFILE>, with the plain CONFLUENCE_<FIELD> as the default account;
+  the older CONFLUENCE_<PROFILE>_<FIELD> keys still resolve. Either spelling of the shared
+  Atlassian credential (JIRA_<FIELD>__<PROFILE>, JIRA_<PROFILE>_<FIELD>, or the plain
+  JIRA_<FIELD>) is reused when no Confluence-specific value is set, and
+  CONFLUENCE_SPACES maps the spaces. See references/cli.md. Secrets must stay in the
+  process environment or a local dotenv only.
 
 Outputs:
   Writes compact text summaries to stdout. No raw JSON unless --json is provided.
@@ -155,9 +159,93 @@ def load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
+# Each plain variable name Rundesk manages, paired with the per-profile suffix this
+# repository has always used, so both spellings resolve to the same field. The keys are
+# exactly the names declared in rundesk.json plus the optional ones a command only uses
+# when present.
+PROFILE_FIELDS = {
+    "CONFLUENCE_BASE_URL": "BASE_URL",
+    "CONFLUENCE_EMAIL": "EMAIL",
+    "CONFLUENCE_API_TOKEN": "API_TOKEN",
+    "CONFLUENCE_SPACES": "SPACES",
+    "CONFLUENCE_LABEL": "LABEL",
+}
+REQUIRED_FIELDS = ("CONFLUENCE_BASE_URL", "CONFLUENCE_EMAIL", "CONFLUENCE_API_TOKEN")
+# Fields shared with the jira package: the same Atlassian site credential serves both, so an
+# account configured for jira works here without a second copy of the token. Spaces are
+# Confluence-only and are never read from a jira key.
+SHARED_ATLASSIAN_FIELDS = {
+    "CONFLUENCE_BASE_URL": "JIRA_BASE_URL",
+    "CONFLUENCE_EMAIL": "JIRA_EMAIL",
+    "CONFLUENCE_API_TOKEN": "JIRA_API_TOKEN",
+    "CONFLUENCE_LABEL": "JIRA_LABEL",
+}
+# A Rundesk account suffix: uppercase words joined by single underscores, because a
+# double underscore is what separates the field name from the account name.
+ACCOUNT_SUFFIX_RE = re.compile(r"[A-Z0-9]+(?:_[A-Z0-9]+)*")
+RESERVED_PROFILE_WORDS = frozenset({"DEFAULT", "ENV"})
+
+
+def normalize_profile(profile: str) -> str:
+    """A profile name as an environment-variable fragment: `example-two` to `EXAMPLE_TWO`."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", profile or "").strip("_").upper()
+
+
+def profile_label(suffix: str) -> str:
+    """The inverse of `normalize_profile`, so a discovered account reads as a profile name."""
+    return suffix.lower().replace("_", "-")
+
+
 def env_name(prefix: str, profile: str, suffix: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9]+", "_", profile).strip("_").upper()
-    return f"{prefix}_{normalized}_{suffix}"
+    return f"{prefix}_{normalize_profile(profile)}_{suffix}"
+
+
+def is_default_profile(profile: str) -> bool:
+    """Rundesk stores the default account under the plain, unsuffixed variable names."""
+    normalized = normalize_profile(profile)
+    if not normalized or normalized == "DEFAULT":
+        return True
+    return normalized in {
+        normalize_profile(os.environ.get("CONFLUENCE_DEFAULT_PROFILE", "")),
+        normalize_profile(os.environ.get("JIRA_DEFAULT_PROFILE", "")),
+    }
+
+
+def missing_name(profile: str, field: str) -> str:
+    """The variable an owner must set, spelled the way Rundesk stores it."""
+    return field if is_default_profile(profile) else f"{field}__{normalize_profile(profile)}"
+
+
+def profile_value(profile: str, field: str) -> str:
+    """Read one field for one profile.
+
+    Every Confluence spelling is exhausted before the shared `JIRA_*` twin is consulted, so
+    a Confluence-specific value always overrides the credential the two packages share —
+    without that, a site whose Confluence lives on a different host than its Jira would
+    silently read the wrong host. Within each family Rundesk's `<FIELD>__<PROFILE>` wins,
+    then this repository's `<PREFIX>_<PROFILE>_<FIELD>`, then the plain `<FIELD>` — which
+    belongs to the default account only, so a named account never pairs one site's URL with
+    another site's token.
+    """
+    shared = SHARED_ATLASSIAN_FIELDS.get(field)
+    families = [("CONFLUENCE", field)]
+    if shared:
+        families.append(("JIRA", shared))
+
+    candidates: list[str] = []
+    normalized = normalize_profile(profile)
+    for prefix, plain in families:
+        if normalized:
+            candidates.append(f"{plain}__{normalized}")
+            candidates.append(env_name(prefix, profile, PROFILE_FIELDS[field]))
+        if is_default_profile(profile):
+            candidates.append(plain)
+
+    for name in candidates:
+        value = os.environ.get(name, "")
+        if value:
+            return value
+    return ""
 
 
 def split_csv(value: str | None) -> list[str]:
@@ -172,7 +260,51 @@ def configured_profile_names() -> list[str]:
     default = os.environ.get("CONFLUENCE_DEFAULT_PROFILE") or os.environ.get("JIRA_DEFAULT_PROFILE", "")
     if default and default not in names:
         names.insert(0, default)
-    return names
+    return names or discovered_profile_names()
+
+
+def discovered_profile_names() -> list[str]:
+    """Accounts present in the environment, so adding one needs no declaration.
+
+    Both spellings are scanned: Rundesk's `<FIELD>__<ACCOUNT>` suffix and this
+    repository's `CONFLUENCE_<PROFILE>_<FIELD>` infix, each for the Confluence field names
+    and the shared jira twins.
+
+    The plain names are one more account — the default one — listed even when only
+    partly configured, so it carries its own error instead of vanishing. It is
+    suppressed when the infix spelling is in use: there a plain value was a fallback
+    shared by every profile, not an account of its own, and inventing one would make
+    every command ambiguous for an owner whose dotenv predates Rundesk.
+    """
+    suffixed: set[str] = set()
+    infixed: set[str] = set()
+    declared = set(PROFILE_FIELDS) | set(SHARED_ATLASSIAN_FIELDS.values())
+    legacy = re.compile(
+        rf"^(?:CONFLUENCE|JIRA)_({ACCOUNT_SUFFIX_RE.pattern})_({'|'.join(PROFILE_FIELDS.values())})$"
+    )
+    for key in os.environ:
+        for field in declared:
+            prefix = f"{field}__"
+            if key.startswith(prefix) and ACCOUNT_SUFFIX_RE.fullmatch(key[len(prefix):]):
+                suffixed.add(profile_label(key[len(prefix):]))
+        match = legacy.match(key)
+        if not match:
+            continue
+        word = match.group(1)
+        if word == "DEFAULT":
+            # `<SKILL>_DEFAULT_<FIELD>` is the infix spelling of the default account, not
+            # an account named `default` that resolution would then never find.
+            infixed.add("default")
+        elif word not in RESERVED_PROFILE_WORDS:
+            infixed.add(profile_label(word))
+    # A partly configured default account is listed with its error instead of vanishing.
+    names = suffixed | infixed
+    # The plain names are the default account. The infix spelling predates that idea and
+    # treated a plain value as a fallback shared by every profile, so an environment
+    # written that way gets no invented `default` account to make selection ambiguous.
+    if not infixed and any(profile_value("", field) for field in REQUIRED_FIELDS):
+        names.add(os.environ.get("CONFLUENCE_DEFAULT_PROFILE") or os.environ.get("JIRA_DEFAULT_PROFILE") or "default")
+    return sorted(names)
 
 
 def validate_base_url(value: str) -> str:
@@ -221,29 +353,27 @@ def open_url(req: urllib.request.Request, timeout: int):
 
 
 def get_profile(name: str) -> Profile:
-    base_url = os.environ.get(env_name("CONFLUENCE", name, "BASE_URL")) or os.environ.get(
-        env_name("JIRA", name, "BASE_URL"), ""
-    )
-    email = os.environ.get(env_name("CONFLUENCE", name, "EMAIL")) or os.environ.get(env_name("JIRA", name, "EMAIL"), "")
-    token = os.environ.get(env_name("CONFLUENCE", name, "API_TOKEN")) or os.environ.get(
-        env_name("JIRA", name, "API_TOKEN"), ""
-    )
-    label = os.environ.get(env_name("CONFLUENCE", name, "LABEL")) or os.environ.get(env_name("JIRA", name, "LABEL"), name)
-    spaces = split_csv(os.environ.get(env_name("CONFLUENCE", name, "SPACES")))
+    base_url = profile_value(name, "CONFLUENCE_BASE_URL")
+    email = profile_value(name, "CONFLUENCE_EMAIL")
+    token = profile_value(name, "CONFLUENCE_API_TOKEN")
+    spaces = split_csv(profile_value(name, "CONFLUENCE_SPACES"))
+    label = profile_value(name, "CONFLUENCE_LABEL") or name
 
-    missing = []
-    if not base_url:
-        missing.append(env_name("JIRA", name, "BASE_URL"))
-    if not email:
-        missing.append(env_name("JIRA", name, "EMAIL"))
-    if not token:
-        missing.append(env_name("JIRA", name, "API_TOKEN"))
+    missing = [
+        missing_name(name, field)
+        for field, value in (
+            ("CONFLUENCE_BASE_URL", base_url),
+            ("CONFLUENCE_EMAIL", email),
+            ("CONFLUENCE_API_TOKEN", token),
+        )
+        if not value
+    ]
 
     if missing:
         raise ConfluenceError(
             "Missing Confluence config: "
             + ", ".join(missing)
-            + ". Add Atlassian credentials to local .env or export them in the shell."
+            + ". Run `rundesk skills configure`, add it to the secrets dotenv, or export it in the shell."
         )
 
     base_url = validate_base_url(base_url)
@@ -449,7 +579,8 @@ def build_search_cql(args: argparse.Namespace, profile: Profile) -> str:
     spaces = args.space or profile.spaces
     if not spaces and not args.all_spaces:
         raise ConfluenceError(
-            "No Confluence spaces configured for this profile. Add CONFLUENCE_<PROFILE>_SPACES, pass --space, or use --all-spaces."
+            "No Confluence spaces configured for this profile. Add CONFLUENCE_SPACES__<PROFILE> "
+            "(or CONFLUENCE_<PROFILE>_SPACES), pass --space, or use --all-spaces."
         )
 
     clauses = ["type = page"]
@@ -524,10 +655,33 @@ def fetch_space_pages(profile: Profile, space_key: str, limit: int) -> list[dict
     )[:limit]
 
 
+def selected_profile_name(args: argparse.Namespace) -> str:
+    profile_name = (
+        getattr(args, "profile", None)
+        or os.environ.get("CONFLUENCE_DEFAULT_PROFILE")
+        or os.environ.get("JIRA_DEFAULT_PROFILE", "")
+    )
+    if profile_name:
+        return profile_name
+
+    names = configured_profile_names()
+    if len(names) == 1:
+        return names[0]
+    if names:
+        raise ConfluenceError(
+            "Multiple Confluence profiles configured; pass --profile or set CONFLUENCE_DEFAULT_PROFILE. "
+            f"Available: {', '.join(names)}"
+        )
+    raise ConfluenceError("No Confluence profile selected. Pass --profile or set CONFLUENCE_DEFAULT_PROFILE.")
+
+
 def command_profiles(args: argparse.Namespace) -> int:
     names = configured_profile_names()
     if not names:
-        print("No Confluence profiles configured. Set CONFLUENCE_PROFILES or JIRA_PROFILES in .env.")
+        print(
+            "No Confluence profiles configured. Run `rundesk skills configure`, or set "
+            "CONFLUENCE_PROFILES and CONFLUENCE_DEFAULT_PROFILE in .env."
+        )
         return 0
 
     print("Confluence profiles")
@@ -722,7 +876,14 @@ def add_common_options(parser: argparse.ArgumentParser, suppress_defaults: bool 
         default=default,
         help="Path to dotenv file. Defaults to the configured shared or isolated Confluence env.",
     )
-    parser.add_argument("--profile", default=default, help="Confluence profile name from env vars.")
+    parser.add_argument(
+        "--profile",
+        default=default,
+        help=(
+            "Confluence account name, from CONFLUENCE_<FIELD>__<PROFILE> or "
+            "CONFLUENCE_<PROFILE>_<FIELD> env vars; the shared JIRA_* twins resolve too."
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -798,19 +959,10 @@ def main() -> int:
     env_file = resolve_env_file(getattr(args, "env_file", None))
     load_dotenv(env_file)
 
-    if not getattr(args, "no_profile", False):
-        args.profile = (
-            getattr(args, "profile", None)
-            or os.environ.get("CONFLUENCE_DEFAULT_PROFILE")
-            or os.environ.get("JIRA_DEFAULT_PROFILE", "")
-        )
-        if not args.profile:
-            print("error: Missing Confluence profile. Set CONFLUENCE_DEFAULT_PROFILE or pass --profile.", file=sys.stderr)
-            return 1
-
     try:
         if getattr(args, "no_profile", False):
             return args.handler(args)
+        args.profile = selected_profile_name(args)
         profile = get_profile(args.profile)
         return args.handler(args, profile)
     except ConfluenceError as exc:

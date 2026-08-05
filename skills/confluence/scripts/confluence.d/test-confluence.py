@@ -79,6 +79,163 @@ class ConfluenceModuleTest(unittest.TestCase):
         self.assertEqual(profile.email, "docs@example.com")
         self.assertEqual(profile.token, "docs-token")
 
+    def test_a_confluence_key_outranks_a_rundesk_managed_jira_twin(self) -> None:
+        """A site whose Confluence is on a different host than its Jira must not silently
+        read the Jira host just because Rundesk supplied the jira value."""
+        env = {
+            "CONFLUENCE_EXAMPLE_BASE_URL": "https://docs.example.com",
+            "CONFLUENCE_EXAMPLE_EMAIL": "docs@example.com",
+            "CONFLUENCE_EXAMPLE_API_TOKEN": "docs-token",
+            "JIRA_BASE_URL__EXAMPLE": "https://jira.example.com",
+            "JIRA_EMAIL__EXAMPLE": "jira@example.com",
+            "JIRA_API_TOKEN__EXAMPLE": "jira-token",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            profile = self.module.get_profile("example")
+
+        self.assertEqual(profile.base_url, "https://docs.example.com")
+        self.assertEqual(profile.email, "docs@example.com")
+        self.assertEqual(profile.token, "docs-token")
+
+    def test_rundesk_suffix_keys_win_over_legacy_profile_keys(self) -> None:
+        env = {
+            "CONFLUENCE_BASE_URL__EXAMPLE": "https://example.atlassian.net",
+            "CONFLUENCE_EMAIL__EXAMPLE": "docs@example.com",
+            "CONFLUENCE_API_TOKEN__EXAMPLE": "rundesk-token",
+            "CONFLUENCE_SPACES__EXAMPLE": "DOCS,TEAM",
+            "CONFLUENCE_LABEL__EXAMPLE": "Example Docs",
+            "CONFLUENCE_EXAMPLE_BASE_URL": "https://legacy.example.test",
+            "CONFLUENCE_EXAMPLE_EMAIL": "legacy@example.com",
+            "CONFLUENCE_EXAMPLE_API_TOKEN": "legacy-token",
+            "CONFLUENCE_EXAMPLE_SPACES": "LEGACY",
+            "JIRA_API_TOKEN__EXAMPLE": "jira-token",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            names = self.module.configured_profile_names()
+            profile = self.module.get_profile("example")
+
+        self.assertEqual(names, ["example"])
+        self.assertEqual(profile.base_url, "https://example.atlassian.net")
+        self.assertEqual(profile.email, "docs@example.com")
+        self.assertEqual(profile.token, "rundesk-token")
+        self.assertEqual(profile.spaces, ["DOCS", "TEAM"])
+        self.assertEqual(profile.label, "Example Docs")
+
+    def test_named_account_never_falls_back_to_plain_values(self) -> None:
+        env = {
+            "CONFLUENCE_BASE_URL": "https://default.example.test",
+            "CONFLUENCE_EMAIL": "default@example.com",
+            "CONFLUENCE_API_TOKEN": "default-token",
+            "JIRA_API_TOKEN": "jira-default-token",
+            "CONFLUENCE_BASE_URL__OTHER": "https://other.example.test",
+            "CONFLUENCE_EMAIL__OTHER": "other@example.com",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.profile_value("other", "CONFLUENCE_API_TOKEN"), "")
+            with self.assertRaises(self.module.ConfluenceError) as raised:
+                self.module.get_profile("other")
+
+        message = str(raised.exception)
+        self.assertIn("CONFLUENCE_API_TOKEN__OTHER", message)
+        self.assertNotIn("default-token", message)
+        self.assertNotIn("jira-default-token", message)
+
+    def test_plain_names_alone_configure_one_default_account(self) -> None:
+        env = {
+            "CONFLUENCE_BASE_URL": "https://example.atlassian.net",
+            "CONFLUENCE_EMAIL": "docs@example.com",
+            "CONFLUENCE_API_TOKEN": "default-token",
+            "CONFLUENCE_SPACES": "DOCS",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            names = self.module.configured_profile_names()
+            profile = self.module.get_profile("default")
+            selected = self.module.selected_profile_name(SimpleNamespace())
+
+        self.assertEqual(names, ["default"])
+        self.assertEqual(selected, "default")
+        self.assertEqual(profile.base_url, "https://example.atlassian.net")
+        self.assertEqual(profile.token, "default-token")
+        self.assertEqual(profile.spaces, ["DOCS"])
+
+    def test_plain_jira_names_alone_configure_the_default_account(self) -> None:
+        env = {
+            "JIRA_BASE_URL": "https://example.atlassian.net",
+            "JIRA_EMAIL": "agent@example.com",
+            "JIRA_API_TOKEN": "jira-default-token",
+            "JIRA_LABEL": "Example Atlassian",
+            "CONFLUENCE_SPACES": "DOCS",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            names = self.module.configured_profile_names()
+            profile = self.module.get_profile("default")
+
+        self.assertEqual(names, ["default"])
+        self.assertEqual(profile.base_url, "https://example.atlassian.net")
+        self.assertEqual(profile.email, "agent@example.com")
+        self.assertEqual(profile.token, "jira-default-token")
+        self.assertEqual(profile.label, "Example Atlassian")
+        self.assertEqual(profile.spaces, ["DOCS"])
+
+    def test_shared_jira_account_resolves_in_rundesk_suffix_form(self) -> None:
+        env = {
+            "JIRA_BASE_URL__EXAMPLE_TWO": "https://example-two.atlassian.net",
+            "JIRA_EMAIL__EXAMPLE_TWO": "agent@example.com",
+            "JIRA_API_TOKEN__EXAMPLE_TWO": "jira-token",
+            "JIRA_LABEL__EXAMPLE_TWO": "Example Two Atlassian",
+            "CONFLUENCE_SPACES__EXAMPLE_TWO": "ENGDOCS",
+            "CONFLUENCE_API_TOKEN__EXAMPLE_TWO": "confluence-token",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            names = self.module.configured_profile_names()
+            profile = self.module.get_profile("example-two")
+
+        self.assertEqual(names, ["example-two"])
+        self.assertEqual(profile.base_url, "https://example-two.atlassian.net")
+        self.assertEqual(profile.token, "confluence-token")
+        self.assertEqual(profile.label, "Example Two Atlassian")
+        self.assertEqual(profile.spaces, ["ENGDOCS"])
+
+    def test_legacy_profile_keys_alone_still_resolve_and_are_discovered(self) -> None:
+        env = {
+            "JIRA_EXAMPLE_BASE_URL": "https://example.atlassian.net",
+            "JIRA_EXAMPLE_EMAIL": "agent@example.com",
+            "JIRA_EXAMPLE_API_TOKEN": "legacy-token",
+            "CONFLUENCE_EXAMPLE_SPACES": "DOCS",
+            "CONFLUENCE_EXAMPLE_TWO_BASE_URL": "https://example-two.atlassian.net",
+            "CONFLUENCE_EXAMPLE_TWO_EMAIL": "docs@example.com",
+            "CONFLUENCE_EXAMPLE_TWO_API_TOKEN": "legacy-token-two",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            names = self.module.configured_profile_names()
+            profile = self.module.get_profile("example")
+
+        self.assertEqual(names, ["example", "example-two"])
+        self.assertEqual(profile.base_url, "https://example.atlassian.net")
+        self.assertEqual(profile.email, "agent@example.com")
+        self.assertEqual(profile.token, "legacy-token")
+        self.assertEqual(profile.spaces, ["DOCS"])
+
+    def test_missing_config_names_the_rundesk_keys_and_the_configure_command(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(self.module.ConfluenceError) as raised:
+                self.module.get_profile("default")
+
+        message = str(raised.exception)
+        self.assertIn("CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN", message)
+        self.assertIn("rundesk skills configure", message)
+
+    def test_profile_selection_refuses_to_guess_between_two_accounts(self) -> None:
+        env = {
+            "CONFLUENCE_BASE_URL__EXAMPLE": "https://example.atlassian.net",
+            "CONFLUENCE_BASE_URL__EXAMPLE_TWO": "https://example-two.atlassian.net",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(self.module.ConfluenceError) as raised:
+                self.module.selected_profile_name(SimpleNamespace())
+
+        self.assertIn("example, example-two", str(raised.exception))
+
     def test_profile_rejects_non_https_or_non_origin_base_urls(self) -> None:
         for base_url in (
             "http://docs.example.com",

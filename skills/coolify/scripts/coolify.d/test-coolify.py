@@ -53,6 +53,84 @@ class CoolifyModuleTest(unittest.TestCase):
         self.assertEqual(profile.base_url, "https://coolify.example.com")
         self.assertEqual(profile.label, "Example Coolify")
 
+    def test_rundesk_suffix_keys_win_over_legacy_keys_for_one_account(self) -> None:
+        env = {
+            "COOLIFY_API_TOKEN__EXAMPLE": "rundesk-token",
+            "COOLIFY_BASE_URL__EXAMPLE": "https://rundesk.example.test",
+            "COOLIFY_EXAMPLE_TOKEN": "legacy-token",
+            "COOLIFY_EXAMPLE_BASE_URL": "https://legacy.example.test",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.configured_profile_names(), ["example"])
+            profile = self.module.get_profile("example")
+        self.assertEqual(profile.token, "rundesk-token")
+        self.assertEqual(profile.base_url, "https://rundesk.example.test")
+
+    def test_named_account_never_falls_back_to_plain_values(self) -> None:
+        env = {
+            "COOLIFY_API_TOKEN": "default-token",
+            "COOLIFY_BASE_URL": "https://default.example.test",
+            "COOLIFY_BASE_URL__EXAMPLE": "https://example.example.test",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.profile_value("example", "COOLIFY_API_TOKEN"), "")
+            with self.assertRaises(self.module.CoolifyError) as raised:
+                self.module.get_profile("example")
+        message = str(raised.exception)
+        self.assertIn("COOLIFY_API_TOKEN__EXAMPLE", message)
+        self.assertNotIn("default-token", message)
+
+    def test_plain_names_alone_give_one_default_account(self) -> None:
+        env = {
+            "COOLIFY_API_TOKEN": "plain-token",
+            "COOLIFY_BASE_URL": "https://coolify.example.test",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.configured_profile_names(), ["default"])
+            name = self.module.selected_profile_name(SimpleNamespace(profile=None))
+            profile = self.module.get_profile(name)
+        self.assertEqual(name, "default")
+        self.assertEqual(profile.token, "plain-token")
+        self.assertEqual(profile.base_url, "https://coolify.example.test")
+
+    def test_legacy_bare_aliases_still_configure_the_default_account(self) -> None:
+        env = {
+            "COOLIFY_TOKEN": "bare-token",
+            "COOLIFY_URL": "https://coolify.example.test",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.configured_profile_names(), ["default"])
+            profile = self.module.get_profile("default")
+        self.assertEqual(profile.token, "bare-token")
+        self.assertEqual(profile.base_url, "https://coolify.example.test")
+
+    def test_legacy_infix_keys_still_resolve_and_are_discovered(self) -> None:
+        env = {
+            "COOLIFY_EXAMPLE_TWO_LABEL": "Example Two",
+            "COOLIFY_EXAMPLE_TWO_TOKEN": "legacy-token",
+            "COOLIFY_EXAMPLE_TWO_BASE_URL": "https://example-two.example.test",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.configured_profile_names(), ["example-two"])
+            profile = self.module.get_profile("example-two")
+        self.assertEqual(profile.token, "legacy-token")
+        self.assertEqual(profile.base_url, "https://example-two.example.test")
+        self.assertEqual(profile.label, "Example Two")
+
+    def test_plain_token_is_not_discovered_as_an_account_named_api(self) -> None:
+        env = {"COOLIFY_API_TOKEN": "plain-token"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.discovered_profile_names(), ["default"])
+
+    def test_missing_default_config_names_the_plain_keys(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(self.module.CoolifyError) as raised:
+                self.module.get_profile("default")
+        message = str(raised.exception)
+        self.assertIn("COOLIFY_API_TOKEN", message)
+        self.assertIn("COOLIFY_BASE_URL", message)
+        self.assertNotIn("__", message)
+
     def test_validate_base_url_strips_api_v1(self) -> None:
         self.assertEqual(
             self.module.validate_base_url("https://coolify.example.com/api/v1"),

@@ -45,19 +45,59 @@ key, an authorization header, or raw dotenv contents.
 
 ### Environment keys
 
+Every field has two accepted spellings. For one profile, the command reads them in this order
+and takes the first non-empty value:
+
+1. `<FIELD>__<PROFILE>` — Rundesk's form, written by `rundesk skills configure`. Rundesk owns
+   these variables and finds accounts by scanning for the suffix, so a new account needs no
+   declaration anywhere.
+2. `STRIPE_<PROFILE>_<FIELD>` — this repository's older form, which this command reads by hand
+   from the dotenv. Kept so an existing file keeps working; nothing manages it for you.
+3. the plain `<FIELD>` — the **default account** only.
+
+A named account never falls back to a plain value. That refusal is the point: `STRIPE_ACCOUNT`
+belongs to the default account, and silently lending it to `acme` would send one business's key
+with another business's connected-account id.
+
+The default account is the profile named `default`, the one named in `STRIPE_DEFAULT_PROFILE`,
+or the implicit account when no profile is named at all.
+
+| Field | Required | Rundesk-managed key | Older dotenv key | Purpose |
+| --- | --- | --- | --- | --- |
+| `STRIPE_API_KEY` | yes | `STRIPE_API_KEY__<PROFILE>` | `STRIPE_<PROFILE>_KEY` | Restricted API key (`rk_...`) for that account. |
+| `STRIPE_ACCOUNT` | optional | `STRIPE_ACCOUNT__<PROFILE>` | `STRIPE_<PROFILE>_ACCOUNT` | `acct_...` id sent as the `Stripe-Account` header. |
+| `STRIPE_API_VERSION` | optional | `STRIPE_API_VERSION__<PROFILE>` | `STRIPE_<PROFILE>_API_VERSION` | Pins `Stripe-Version`; defaults to the account's version. |
+| `STRIPE_LABEL` | optional | `STRIPE_LABEL__<PROFILE>` | `STRIPE_<PROFILE>_LABEL` | Human-readable account name in output. |
+
+`STRIPE_API_KEY` is the only required name; it is what `rundesk.json` declares. Two further
+keys route rather than authenticate, and are read only from the dotenv:
+
 | Key | Required | Purpose |
 | --- | --- | --- |
-| `STRIPE_PROFILES` | recommended | Comma-separated profile names, in listing order. |
+| `STRIPE_PROFILES` | optional | Comma-separated profile names, in listing order. Overrides discovery. |
 | `STRIPE_DEFAULT_PROFILE` | optional | Profile used when `--profile` is absent. |
-| `STRIPE_<PROFILE>_KEY` | yes | Restricted API key (`rk_...`) for that account. |
-| `STRIPE_<PROFILE>_LABEL` | optional | Human-readable account name in output. |
-| `STRIPE_<PROFILE>_ACCOUNT` | optional | `acct_...` id sent as the `Stripe-Account` header. |
-| `STRIPE_<PROFILE>_API_VERSION` | optional | Pins `Stripe-Version`; defaults to the account's version. |
+
+Neither is needed for a Rundesk-managed setup: with no `STRIPE_PROFILES`, `profiles` lists
+every account it finds in either spelling, plus the default account when a plain name is set.
 
 A profile name is upper-cased and non-alphanumeric characters become underscores, so profile
-`platform-sub` reads `STRIPE_PLATFORM_SUB_KEY`.
+`platform-sub` reads `STRIPE_API_KEY__PLATFORM_SUB` or `STRIPE_PLATFORM_SUB_KEY`.
 
 ```sh
+# Rundesk's form: one default account and two named ones.
+STRIPE_API_KEY=rk_live_synthetic
+STRIPE_LABEL=Example Inc
+
+STRIPE_API_KEY__WIDGETS=rk_live_synthetic
+STRIPE_LABEL__WIDGETS=Widgets Ltd
+
+STRIPE_API_KEY__PLATFORM_SUB=rk_live_synthetic
+STRIPE_ACCOUNT__PLATFORM_SUB=acct_synthetic
+STRIPE_LABEL__PLATFORM_SUB=Connected merchant
+```
+
+```sh
+# This repository's older form, still read from the dotenv.
 STRIPE_PROFILES=acme,widgets,platform-sub
 STRIPE_DEFAULT_PROFILE=acme
 
@@ -72,9 +112,9 @@ STRIPE_PLATFORM_SUB_ACCOUNT=acct_synthetic
 STRIPE_PLATFORM_SUB_LABEL=Connected merchant
 ```
 
-When no `STRIPE_<PROFILE>_KEY` is set, the command falls back to `STRIPE_API_KEY` or
-`STRIPE_SECRET_KEY` so a single-account setup works without profile prefixes. Because of that
-fallback, `api`, `secret`, and `default` are reserved and cannot be used as profile names.
+An older single-account dotenv may spell the default account's key `STRIPE_SECRET_KEY`; that
+name still resolves, for the default account only. Because the plain names exist, `api`,
+`secret`, `default`, and `env` are reserved and cannot be used as profile names.
 
 ### Two ways to hold several accounts
 

@@ -79,7 +79,82 @@ class DiscordModuleTest(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(self.module.DiscordError) as raised:
                 self.module.get_profile("example")
-        self.assertIn("DISCORD_EXAMPLE_TOKEN", str(raised.exception))
+        message = str(raised.exception)
+        self.assertIn("DISCORD_BOT_TOKEN__EXAMPLE", message)
+        self.assertIn("rundesk skills configure", message)
+
+    def test_rundesk_suffix_wins_over_the_legacy_form(self) -> None:
+        env = {
+            "DISCORD_BOT_TOKEN__EXAMPLE": "rundesk-tok",
+            "DISCORD_EXAMPLE_TOKEN": "legacy-tok",
+            "DISCORD_LABEL__EXAMPLE": "Rundesk bot",
+            "DISCORD_EXAMPLE_LABEL": "Legacy bot",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["example"], self.module.configured_profile_names())
+            profile = self.module.get_profile("example")
+        self.assertEqual("rundesk-tok", profile.token)
+        self.assertEqual("Rundesk bot", profile.label)
+
+    def test_legacy_profile_form_still_resolves(self) -> None:
+        env = {
+            "DISCORD_EXAMPLE_TOKEN": "legacy-tok",
+            "DISCORD_EXAMPLE_ALLOW_GUILDS": GUILD,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["example"], self.module.configured_profile_names())
+            profile = self.module.get_profile("example")
+        self.assertEqual("legacy-tok", profile.token)
+        self.assertEqual((GUILD,), profile.allow_guilds)
+
+    def test_a_named_account_does_not_read_the_plain_token(self) -> None:
+        env = {"DISCORD_BOT_TOKEN": "default-tok", "DISCORD_TOKEN": "gateway-tok"}
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(self.module.DiscordError) as raised:
+                self.module.get_profile("example")
+            self.assertEqual("default-tok", self.module.get_profile("default").token)
+        self.assertIn("DISCORD_BOT_TOKEN__EXAMPLE", str(raised.exception))
+
+    def test_the_plain_token_alias_configures_the_default_account(self) -> None:
+        with patch.dict(os.environ, {"DISCORD_TOKEN": "gateway-tok"}, clear=True):
+            self.assertEqual(["default"], self.module.configured_profile_names())
+            self.assertEqual("gateway-tok", self.module.get_profile("default").token)
+
+    def test_plain_names_alone_give_one_default_account(self) -> None:
+        env = {"DISCORD_BOT_TOKEN": "tok", "DISCORD_LABEL": "House bot"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["default"], self.module.configured_profile_names())
+            self.assertEqual("House bot", self.module.get_profile("default").label)
+
+    def test_a_named_default_account_reads_the_plain_names(self) -> None:
+        env = {"DISCORD_DEFAULT_PROFILE": "example", "DISCORD_BOT_TOKEN": "tok"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["example"], self.module.configured_profile_names())
+            self.assertEqual("tok", self.module.get_profile("example").token)
+
+    def test_a_named_account_inherits_the_plain_allow_lists(self) -> None:
+        """A guardrail must never narrow: adding an account cannot unbound it."""
+        env = {
+            "DISCORD_BOT_TOKEN__EXAMPLE": "tok",
+            "DISCORD_ALLOW_GUILDS": GUILD,
+            "DISCORD_ALLOW_CHANNELS": CHANNEL,
+            "DISCORD_ALLOW_USERS": USER,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            profile = self.module.get_profile("example")
+        self.assertEqual((GUILD,), profile.allow_guilds)
+        self.assertEqual((CHANNEL,), profile.allow_channels)
+        self.assertEqual((USER,), profile.allow_users)
+        self.assertTrue(profile.bounded)
+
+    def test_a_named_allow_list_overrides_the_plain_one(self) -> None:
+        env = {
+            "DISCORD_BOT_TOKEN__EXAMPLE": "tok",
+            "DISCORD_ALLOW_CHANNELS": "999888777666555444",
+            "DISCORD_ALLOW_CHANNELS__EXAMPLE": CHANNEL,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual((CHANNEL,), self.module.get_profile("example").allow_channels)
 
     def test_authorization_header_is_a_bot_credential(self) -> None:
         self.assertEqual("Bot secret-token", self.profile.auth_headers()["Authorization"])
@@ -131,7 +206,7 @@ class DiscordModuleTest(unittest.TestCase):
         with patch.object(self.module, "get_profile", return_value=bounded):
             with self.assertRaises(self.module.DiscordError) as raised:
                 self.module.cmd_send(sending(confirm=True))
-        self.assertIn("DISCORD_EXAMPLE_ALLOW_CHANNELS", str(raised.exception))
+        self.assertIn("DISCORD_ALLOW_CHANNELS__EXAMPLE", str(raised.exception))
 
     def test_allow_guilds_checks_the_channel_it_was_given(self) -> None:
         bounded = self.module.Profile(
@@ -140,7 +215,7 @@ class DiscordModuleTest(unittest.TestCase):
         with patch.object(self.module, "request", return_value={"guild_id": "1" * 18}):
             with self.assertRaises(self.module.DiscordError) as raised:
                 self.module.allow_channel(bounded, CHANNEL)
-        self.assertIn("DISCORD_EXAMPLE_ALLOW_GUILDS", str(raised.exception))
+        self.assertIn("DISCORD_ALLOW_GUILDS__EXAMPLE", str(raised.exception))
         with patch.object(self.module, "request", return_value={"guild_id": GUILD}):
             self.module.allow_channel(bounded, CHANNEL)
 

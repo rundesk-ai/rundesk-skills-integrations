@@ -77,11 +77,21 @@ class StripeProfileTest(unittest.TestCase):
             with self.assertRaises(self.module.StripeError):
                 self.module.get_profile("example")
 
-    def test_missing_key_is_reported_by_variable_name(self) -> None:
+    def test_missing_named_account_key_is_reported_by_rundesk_variable_name(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(self.module.StripeError) as raised:
                 self.module.get_profile("example")
-        self.assertIn("STRIPE_EXAMPLE_KEY", str(raised.exception))
+        message = str(raised.exception)
+        self.assertIn("STRIPE_API_KEY__EXAMPLE", message)
+        self.assertIn("rundesk skills configure", message)
+
+    def test_missing_default_account_key_is_reported_by_plain_variable_name(self) -> None:
+        with patch.dict(os.environ, {"STRIPE_LABEL": "Example Inc"}, clear=True):
+            with self.assertRaises(self.module.StripeError) as raised:
+                self.module.get_profile("default")
+        message = str(raised.exception)
+        self.assertIn("STRIPE_API_KEY", message)
+        self.assertNotIn("STRIPE_API_KEY__", message)
 
     def test_invalid_connected_account_is_rejected(self) -> None:
         env = {"STRIPE_EXAMPLE_KEY": "rk_live_synthetic", "STRIPE_EXAMPLE_ACCOUNT": "not-an-account"}
@@ -89,10 +99,89 @@ class StripeProfileTest(unittest.TestCase):
             with self.assertRaises(self.module.StripeError):
                 self.module.get_profile("example")
 
-    def test_discovery_ignores_conventional_single_account_variables(self) -> None:
+    def test_plain_key_is_the_default_account_not_a_profile_named_api(self) -> None:
+        env = {"STRIPE_API_KEY": "rk_live_synthetic"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["default"], self.module.discovered_profile_names())
+
+    def test_a_legacy_account_beside_a_plain_key_stays_one_account(self) -> None:
+        """The plain key was that account's fallback before Rundesk; inventing a second
+        account here would make every command refuse as ambiguous."""
         env = {"STRIPE_API_KEY": "rk_live_synthetic", "STRIPE_ACME_KEY": "rk_live_synthetic"}
         with patch.dict(os.environ, env, clear=True):
             self.assertEqual(["acme"], self.module.discovered_profile_names())
+            self.assertEqual("acme", self.module.selected_profile_name(SimpleNamespace()))
+
+    def test_a_rundesk_account_beside_a_plain_key_is_two_accounts(self) -> None:
+        env = {"STRIPE_API_KEY": "rk_live_synthetic", "STRIPE_API_KEY__ACME": "rk_live_synthetic"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["acme", "default"], self.module.discovered_profile_names())
+
+    def test_rundesk_suffix_form_wins_over_legacy_form(self) -> None:
+        env = {
+            "STRIPE_API_KEY__ACME": "rk_live_syntheticrundesk",
+            "STRIPE_ACME_KEY": "rk_live_syntheticlegacy",
+            "STRIPE_ACCOUNT__ACME": "acct_synthetic1",
+            "STRIPE_ACME_ACCOUNT": "acct_synthetic2",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["acme"], self.module.discovered_profile_names())
+            profile = self.module.get_profile("acme")
+        self.assertEqual("rk_live_syntheticrundesk", profile.key)
+        self.assertEqual("acct_synthetic1", profile.account)
+
+    def test_named_account_never_reads_the_plain_default_values(self) -> None:
+        env = {
+            "STRIPE_API_KEY": "rk_live_syntheticdefault",
+            "STRIPE_ACCOUNT": "acct_synthetic1",
+            "STRIPE_API_KEY__ACME": "rk_live_syntheticacme",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            profile = self.module.get_profile("acme")
+            with self.assertRaises(self.module.StripeError):
+                self.module.get_profile("widgets")
+        self.assertEqual("rk_live_syntheticacme", profile.key)
+        self.assertEqual("", profile.account)
+
+    def test_rundesk_suffix_form_reads_a_hyphenated_account(self) -> None:
+        env = {
+            "STRIPE_API_KEY__PLATFORM_SUB": "rk_test_synthetic",
+            "STRIPE_ACCOUNT__PLATFORM_SUB": "acct_synthetic1",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["platform-sub"], self.module.discovered_profile_names())
+            profile = self.module.get_profile("platform-sub")
+        self.assertEqual("rk_test_synthetic", profile.key)
+        self.assertEqual("acct_synthetic1", profile.account)
+
+    def test_plain_names_alone_configure_one_default_account(self) -> None:
+        env = {"STRIPE_API_KEY": "rk_live_synthetic", "STRIPE_LABEL": "Example Inc"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["default"], self.module.configured_profile_names())
+            name = self.module.selected_profile_name(SimpleNamespace(profile=None))
+            profile = self.module.get_profile(name)
+        self.assertEqual("default", profile.name)
+        self.assertEqual("rk_live_synthetic", profile.key)
+        self.assertEqual("Example Inc", profile.label)
+
+    def test_legacy_bare_alias_configures_the_default_account(self) -> None:
+        with patch.dict(os.environ, {"STRIPE_SECRET_KEY": "sk_test_synthetic"}, clear=True):
+            self.assertEqual(["default"], self.module.configured_profile_names())
+            profile = self.module.get_profile("default")
+        self.assertEqual("sk_test_synthetic", profile.key)
+        self.assertEqual("secret", profile.key_kind)
+
+    def test_named_default_profile_reads_the_plain_values(self) -> None:
+        env = {
+            "STRIPE_DEFAULT_PROFILE": "acme",
+            "STRIPE_API_KEY": "rk_live_synthetic",
+            "STRIPE_ACCOUNT": "acct_synthetic1",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["acme"], self.module.configured_profile_names())
+            profile = self.module.get_profile("acme")
+        self.assertEqual("rk_live_synthetic", profile.key)
+        self.assertEqual("acct_synthetic1", profile.account)
 
     def test_ambiguous_profile_selection_is_refused(self) -> None:
         env = {"STRIPE_PROFILES": "one,two"}

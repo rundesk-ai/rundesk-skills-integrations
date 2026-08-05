@@ -74,7 +74,26 @@ wanted — Create Public Threads and Add Reactions.
 Enable **Message Content Intent** under Bot → Privileged Gateway Intents if the bot must read
 message text it was not mentioned in.
 
+### Environment keys
+
+`rundesk.json` declares one required name: **`DISCORD_BOT_TOKEN`**. `DISCORD_LABEL` and the
+three `DISCORD_ALLOW_*` lists are optional.
+
+Two spellings resolve, and both keep working:
+
 ```dotenv
+# Rundesk-managed (written by `rundesk skills configure`): the plain name is the default
+# account, and `__<ACCOUNT>` names another one. A new account needs no declaration.
+DISCORD_BOT_TOKEN=
+DISCORD_BOT_TOKEN__EXAMPLE=
+DISCORD_LABEL__EXAMPLE=Example bot
+DISCORD_ALLOW_GUILDS__EXAMPLE=
+DISCORD_ALLOW_CHANNELS__EXAMPLE=
+DISCORD_ALLOW_USERS__EXAMPLE=
+```
+
+```dotenv
+# This repository's older form, a dotenv this command reads by hand. Still supported.
 DISCORD_PROFILES=example
 DISCORD_DEFAULT_PROFILE=example
 DISCORD_EXAMPLE_LABEL=Example bot
@@ -84,10 +103,17 @@ DISCORD_EXAMPLE_ALLOW_CHANNELS=
 DISCORD_EXAMPLE_ALLOW_USERS=
 ```
 
-A single bot needs no profile ceremony: `DISCORD_BOT_TOKEN` alone configures a profile
-called `default`. `DISCORD_TOKEN` is accepted too, and is the same variable a Rundesk
-Discord *channel* reads — an install that exports it hands this command the same bot
-identity the agent already answers on.
+One field of one account resolves highest first: `DISCORD_<FIELD>__<ACCOUNT>`, then
+`DISCORD_<ACCOUNT>_<FIELD>`, then the plain `DISCORD_<FIELD>`. **A named account never falls
+back to a plain value** — that is how one bot's token gets paired with another bot's write
+bounds. The plain names belong to the default account: no `--profile`, `default`, or the name
+in `DISCORD_DEFAULT_PROFILE`. The one deliberate exception is the `DISCORD_ALLOW_*`
+guardrails, below.
+
+A single bot needs no profile ceremony: `DISCORD_BOT_TOKEN` alone configures an account
+called `default`. `DISCORD_TOKEN` is accepted as a legacy bare alias for it, and is the same
+variable a Rundesk Discord *channel* reads — an install that exports it hands this command the
+same bot identity the agent already answers on.
 
 Credential search: process env → `--env-file` → `DISCORD_ENV_FILE` →
 `RUNDESK_INTEGRATIONS_ENV` → `~/.config/rundesk/integrations/discord/env` → legacy
@@ -97,7 +123,9 @@ Credential search: process env → `--env-file` → `DISCORD_ENV_FILE` →
 
 The three `ALLOW_` lists are comma-separated snowflakes and bound where writes may land.
 Unprefixed `DISCORD_ALLOW_GUILDS`, `DISCORD_ALLOW_CHANNELS`, and `DISCORD_ALLOW_USERS`
-apply to every profile that does not set its own.
+apply to **every** account that does not set its own — the one field group where a plain value
+is not limited to the default account, because a guardrail must never narrow: adding an
+account could otherwise silently leave it unbounded.
 
 | Configured | Effect |
 |---|---|
