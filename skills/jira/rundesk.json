@@ -1,0 +1,7 @@
+{
+  "needs": {
+    "JIRA_BASE_URL": "your Atlassian site origin, such as https://example.atlassian.net — the host shown in the browser address bar while you are signed in to Jira, with no path",
+    "JIRA_EMAIL": "the email address of the Atlassian account the API token belongs to; Jira rejects the token without the matching address",
+    "JIRA_API_TOKEN": "an Atlassian API token from id.atlassian.com, under Security > Create and manage API tokens > Create API token"
+  }
+}

@@ -27,8 +27,11 @@ Usage:
   coolify deploy --uuid APP_OR_RESOURCE_UUID [--force] [--profile example] [--confirm]
 
 Inputs:
-  Reads dotenv outside the Rundesk script library. Configure COOLIFY_PROFILES
-  and COOLIFY_<PROFILE>_* keys; see README. Secrets stay in local .env only.
+  Reads process env or an explicit/shared/isolated dotenv kept outside the Rundesk
+  script library. Rundesk-managed accounts use COOLIFY_<FIELD>__<PROFILE>, with the
+  plain COOLIFY_<FIELD> as the default account; the older COOLIFY_<PROFILE>_<FIELD>
+  keys still resolve. See references/cli.md. Secrets stay in the process environment
+  or a local dotenv only.
 
 Outputs:
   Compact text / CSV for agent context. --json for structured payloads.
@@ -139,7 +142,7 @@ class Profile:
     def auth_headers(self) -> dict[str, str]:
         if not self.token:
             raise CoolifyError(
-                f"Profile {self.name!r} missing {env_name(self.name, 'TOKEN')}."
+                f"Profile {self.name!r} missing {missing_name(self.name, 'COOLIFY_API_TOKEN')}."
             )
         return {
             "Authorization": f"Bearer {self.token}",
@@ -171,9 +174,80 @@ def load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
+# Each plain variable name Rundesk manages, paired with the per-profile suffix this
+# repository has always used, so both spellings resolve to the same field. The required
+# keys are exactly the names declared in rundesk.json.
+PROFILE_FIELDS = {
+    "COOLIFY_API_TOKEN": "TOKEN",
+    "COOLIFY_BASE_URL": "BASE_URL",
+    "COOLIFY_LABEL": "LABEL",
+}
+REQUIRED_FIELDS = ("COOLIFY_API_TOKEN", "COOLIFY_BASE_URL")
+# Bare names an older dotenv may still use for the default account.
+PLAIN_ALIASES = {
+    "COOLIFY_API_TOKEN": ("COOLIFY_TOKEN",),
+    "COOLIFY_BASE_URL": ("COOLIFY_URL",),
+}
+# A Rundesk account suffix: uppercase words joined by single underscores, because a
+# double underscore is what separates the field name from the account name.
+ACCOUNT_SUFFIX_RE = re.compile(r"[A-Z0-9]+(?:_[A-Z0-9]+)*")
+# Words that are never an account in the legacy infix spelling: `API` is what stops the
+# plain COOLIFY_API_TOKEN being discovered as an account named `api`.
+RESERVED_PROFILE_WORDS = frozenset({"DEFAULT", "API"})
+
+
+def normalize_profile(profile: str) -> str:
+    """A profile name as an environment-variable fragment: `example-two` to `EXAMPLE_TWO`."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", profile or "").strip("_").upper()
+
+
+def profile_label(suffix: str) -> str:
+    """The inverse of `normalize_profile`, so a discovered account reads as a profile name."""
+    return suffix.lower().replace("_", "-")
+
+
 def env_name(profile: str, suffix: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9]+", "_", profile).strip("_").upper()
-    return f"COOLIFY_{normalized}_{suffix}"
+    return f"COOLIFY_{normalize_profile(profile)}_{suffix}"
+
+
+def is_default_profile(profile: str) -> bool:
+    """Rundesk stores the default account under the plain, unsuffixed variable names."""
+    normalized = normalize_profile(profile)
+    if not normalized or normalized == "DEFAULT":
+        return True
+    return normalized == normalize_profile(os.environ.get("COOLIFY_DEFAULT_PROFILE", ""))
+
+
+def missing_name(profile: str, field: str) -> str:
+    """The variable an owner must set, spelled the way Rundesk stores it."""
+    return field if is_default_profile(profile) else f"{field}__{normalize_profile(profile)}"
+
+
+def plain_value(field: str) -> str:
+    """The default account's value: the plain Rundesk name, then any legacy bare alias."""
+    for name in (field, *PLAIN_ALIASES.get(field, ())):
+        value = os.environ.get(name, "")
+        if value:
+            return value
+    return ""
+
+
+def profile_value(profile: str, field: str) -> str:
+    """Read one field for one profile.
+
+    Rundesk's `<FIELD>__<PROFILE>` wins, then this repository's `COOLIFY_<PROFILE>_<FIELD>`,
+    then the plain `<FIELD>` and its legacy aliases — which belong to the default account
+    only, so a named account never pairs one instance's URL with another instance's token.
+    """
+    normalized = normalize_profile(profile)
+    if normalized:
+        for name in (f"{field}__{normalized}", env_name(profile, PROFILE_FIELDS[field])):
+            value = os.environ.get(name, "")
+            if value:
+                return value
+    if not is_default_profile(profile):
+        return ""
+    return plain_value(field)
 
 
 def split_csv(value: str | None) -> list[str]:
@@ -191,18 +265,43 @@ def configured_profile_names() -> list[str]:
 
 
 def discovered_profile_names() -> list[str]:
-    names: set[str] = set()
-    pattern = re.compile(r"^COOLIFY_([A-Z0-9_]+)_(TOKEN|BASE_URL|LABEL)$")
+    """Accounts present in the environment, so adding one needs no declaration.
+
+    Both spellings are scanned: Rundesk's `<FIELD>__<ACCOUNT>` suffix and this
+    repository's `COOLIFY_<PROFILE>_<FIELD>` infix.
+
+    The plain names are one more account — the default one — listed even when only
+    partly configured, so it carries its own error instead of vanishing. It is
+    suppressed when the infix spelling is in use: there a plain value was a fallback
+    shared by every profile, not an account of its own, and inventing one would make
+    every command ambiguous for an owner whose dotenv predates Rundesk.
+    """
+    suffixed: set[str] = set()
+    infixed: set[str] = set()
+    legacy = re.compile(
+        rf"^COOLIFY_({ACCOUNT_SUFFIX_RE.pattern})_({'|'.join(PROFILE_FIELDS.values())})$"
+    )
     for key in os.environ:
-        match = pattern.match(key)
+        for field in PROFILE_FIELDS:
+            prefix = f"{field}__"
+            if key.startswith(prefix) and ACCOUNT_SUFFIX_RE.fullmatch(key[len(prefix):]):
+                suffixed.add(profile_label(key[len(prefix):]))
+        match = legacy.match(key)
         if not match:
             continue
-        raw = match.group(1)
-        if raw in {"DEFAULT", "API"}:
-            continue
-        names.add(raw.lower().replace("_", "-"))
-    if os.environ.get("COOLIFY_TOKEN") or os.environ.get("COOLIFY_API_TOKEN"):
-        names.add(os.environ.get("COOLIFY_DEFAULT_PROFILE", "default") or "default")
+        word = match.group(1)
+        if word == "DEFAULT":
+            # `<SKILL>_DEFAULT_<FIELD>` is the infix spelling of the default account, not
+            # an account named `default` that resolution would then never find.
+            infixed.add("default")
+        elif word not in RESERVED_PROFILE_WORDS:
+            infixed.add(profile_label(word))
+    names = suffixed | infixed
+    # The plain names are the default account. The infix spelling predates that idea and
+    # treated a plain value as a fallback shared by every profile, so an environment
+    # written that way gets no invented `default` account to make selection ambiguous.
+    if not infixed and any(profile_value("", field) for field in REQUIRED_FIELDS):
+        names.add(os.environ.get("COOLIFY_DEFAULT_PROFILE") or "default")
     return sorted(names)
 
 
@@ -244,29 +343,21 @@ def validate_base_url(value: str) -> str:
 
 
 def get_profile(name: str) -> Profile:
-    token = (
-        os.environ.get(env_name(name, "TOKEN"))
-        or os.environ.get("COOLIFY_TOKEN")
-        or os.environ.get("COOLIFY_API_TOKEN")
-        or ""
-    )
-    base_url = (
-        os.environ.get(env_name(name, "BASE_URL"))
-        or os.environ.get("COOLIFY_BASE_URL")
-        or os.environ.get("COOLIFY_URL")
-        or ""
-    )
-    label = os.environ.get(env_name(name, "LABEL"), name)
-    missing = []
-    if not token:
-        missing.append(env_name(name, "TOKEN"))
-    if not base_url:
-        missing.append(env_name(name, "BASE_URL"))
+    token = profile_value(name, "COOLIFY_API_TOKEN")
+    base_url = profile_value(name, "COOLIFY_BASE_URL")
+    label = profile_value(name, "COOLIFY_LABEL") or name
+
+    missing = [
+        missing_name(name, field)
+        for field, value in (("COOLIFY_API_TOKEN", token), ("COOLIFY_BASE_URL", base_url))
+        if not value
+    ]
+
     if missing:
         raise CoolifyError(
             "Missing Coolify config: "
             + ", ".join(missing)
-            + ". Add to secrets dotenv or export in the shell."
+            + ". Run `rundesk skills configure`, add it to the secrets dotenv, or export it in the shell."
         )
     return Profile(name=name, token=token, base_url=validate_base_url(base_url), label=label)
 
@@ -282,11 +373,12 @@ def selected_profile_name(args: argparse.Namespace) -> str:
         return names[0]
     if not names:
         raise CoolifyError(
-            "No Coolify profiles configured. Set COOLIFY_PROFILES and "
-            "COOLIFY_<PROFILE>_TOKEN / COOLIFY_<PROFILE>_BASE_URL."
+            "No Coolify profiles configured. Run `rundesk skills configure`, or set "
+            "COOLIFY_API_TOKEN__<PROFILE> / COOLIFY_BASE_URL__<PROFILE> (the older "
+            "COOLIFY_<PROFILE>_TOKEN / COOLIFY_<PROFILE>_BASE_URL still work)."
         )
     raise CoolifyError(
-        "Multiple Coolify profiles configured; pass --profile. "
+        "Multiple Coolify profiles configured; pass --profile or set COOLIFY_DEFAULT_PROFILE. "
         f"Available: {', '.join(names)}"
     )
 
@@ -465,7 +557,10 @@ def deploy_row(item: dict[str, Any], profile: Profile) -> dict[str, Any]:
 def cmd_profiles(_args: argparse.Namespace) -> int:
     names = configured_profile_names()
     if not names:
-        print("No Coolify profiles configured.")
+        print(
+            "No Coolify profiles configured. Run `rundesk skills configure`, or set "
+            "COOLIFY_PROFILES and COOLIFY_DEFAULT_PROFILE in the secrets dotenv."
+        )
         return 0
     default = os.environ.get("COOLIFY_DEFAULT_PROFILE", "")
     for name in names:
@@ -843,7 +938,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_common(p: argparse.ArgumentParser, *, limit: bool = False) -> None:
-        p.add_argument("--profile", default=None)
+        p.add_argument(
+            "--profile",
+            default=None,
+            help="Coolify account name, from COOLIFY_<FIELD>__<PROFILE> or COOLIFY_<PROFILE>_<FIELD> env vars.",
+        )
         p.add_argument("--json", action="store_true")
         if limit:
             p.add_argument("--limit", type=int, default=50)

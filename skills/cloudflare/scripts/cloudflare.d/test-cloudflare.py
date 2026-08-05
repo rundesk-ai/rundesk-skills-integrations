@@ -69,6 +69,120 @@ class CloudflareModuleTest(unittest.TestCase):
         self.assertEqual(headers["X-Auth-Key"], "global-secret")
         self.assertNotIn("Authorization", headers)
 
+    def test_rundesk_suffix_wins_over_legacy_keys(self) -> None:
+        env = {
+            "CLOUDFLARE_API_TOKEN__EXAMPLE_TWO": "rundesk-secret",
+            "CLOUDFLARE_ACCOUNT_ID__EXAMPLE_TWO": "acct-rundesk",
+            "CLOUDFLARE_EXAMPLE_TWO_TOKEN": "legacy-secret",
+            "CLOUDFLARE_EXAMPLE_TWO_ACCOUNT_ID": "acct-legacy",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.configured_profile_names(), ["example-two"])
+            profile = self.module.get_profile("example-two")
+        self.assertEqual(profile.token, "rundesk-secret")
+        self.assertEqual(profile.account_id, "acct-rundesk")
+
+    def test_named_account_ignores_plain_values(self) -> None:
+        env = {
+            "CLOUDFLARE_API_TOKEN": "default-secret",
+            "CLOUDFLARE_ACCOUNT_ID": "acct-default",
+            "CLOUDFLARE_API_TOKEN__EXAMPLE": "example-secret",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            profile = self.module.get_profile("example")
+            self.assertEqual(
+                self.module.configured_profile_names(), ["default", "example"]
+            )
+        self.assertEqual(profile.token, "example-secret")
+        self.assertEqual(profile.account_id, "")
+
+    def test_named_account_missing_token_names_rundesk_key(self) -> None:
+        env = {"CLOUDFLARE_API_TOKEN": "default-secret"}
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(self.module.CloudflareError) as raised:
+                self.module.get_profile("example")
+        message = str(raised.exception)
+        self.assertIn("CLOUDFLARE_API_TOKEN__EXAMPLE", message)
+        self.assertIn("rundesk skills configure", message)
+        self.assertNotIn("default-secret", message)
+
+    def test_plain_names_alone_give_one_default_account(self) -> None:
+        env = {"CLOUDFLARE_API_TOKEN": "default-secret"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.configured_profile_names(), ["default"])
+            profile = self.module.get_profile("default")
+        self.assertEqual(profile.token, "default-secret")
+        self.assertTrue(profile.has_bearer())
+
+    def test_plain_alias_resolves_for_default_account_only(self) -> None:
+        env = {"CF_API_TOKEN": "alias-secret"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.configured_profile_names(), ["default"])
+            self.assertEqual(self.module.get_profile("").token, "alias-secret")
+            self.assertEqual(
+                self.module.profile_value("example", "CLOUDFLARE_API_TOKEN"), ""
+            )
+
+    def test_default_profile_name_reads_plain_values(self) -> None:
+        env = {
+            "CLOUDFLARE_DEFAULT_PROFILE": "example",
+            "CLOUDFLARE_API_TOKEN": "default-secret",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.configured_profile_names(), ["example"])
+            profile = self.module.get_profile("example")
+        self.assertEqual(profile.token, "default-secret")
+
+    def test_legacy_keys_still_resolve_unchanged(self) -> None:
+        env = {"CLOUDFLARE_EXAMPLE_TOKEN": "legacy-secret"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.discovered_profile_names(), ["example"])
+            profile = self.module.get_profile("example")
+        self.assertEqual(profile.token, "legacy-secret")
+
+    def test_legacy_contact_key_names_the_account_not_the_field(self) -> None:
+        env = {"CLOUDFLARE_ACME_CONTACT_EMAIL": "owner@example.test"}
+        with patch.dict(os.environ, env, clear=True):
+            names = self.module.discovered_profile_names()
+        self.assertEqual(names, ["acme"])
+        self.assertNotIn("acme-contact", names)
+
+    def test_plain_contact_key_is_not_an_account(self) -> None:
+        env = {
+            "CLOUDFLARE_CONTACT_EMAIL": "owner@example.test",
+            "CLOUDFLARE_API_TOKEN": "default-secret",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.discovered_profile_names(), ["default"])
+
+    def test_contact_fields_prefer_the_rundesk_spelling(self) -> None:
+        env = {
+            "CLOUDFLARE_CONTACT_EMAIL__EXAMPLE": "rundesk@example.test",
+            "CLOUDFLARE_EXAMPLE_CONTACT_EMAIL": "legacy@example.test",
+            "CLOUDFLARE_EXAMPLE_CONTACT_CITY": "Example City",
+            "CLOUDFLARE_CONTACT_PHONE": "+15550000000",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            contact = self.module.contact_from_env(self.profile)
+        self.assertEqual(
+            contact, {"email": "rundesk@example.test", "city": "Example City"}
+        )
+
+    def test_contact_fields_read_plain_names_for_the_default_account(self) -> None:
+        env = {"CLOUDFLARE_CONTACT_EMAIL": "owner@example.test"}
+        default = self.module.Profile(
+            name="default",
+            token="token",
+            email="",
+            global_key="",
+            account_id="acct-1",
+            label="Default",
+        )
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(
+                self.module.contact_from_env(default), {"email": "owner@example.test"}
+            )
+
     def test_normalize_domain_rejects_junk(self) -> None:
         with self.assertRaises(self.module.CloudflareError):
             self.module.normalize_domain("not a domain")

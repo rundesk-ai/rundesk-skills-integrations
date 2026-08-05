@@ -7,22 +7,39 @@ section below names the same set, and the catalog suite fails when the two disag
 ```sh
 rundesk skills install https://github.com/rundesk-ai/rundesk-skills-integrations
 rundesk skills install https://github.com/rundesk-ai/rundesk-skills-integrations --confirm
-rundesk skills grant <agent> cloudflare
+rundesk skills grant <agent> rundesk-skills-integrations/cloudflare
 ```
 
-Installation makes every skill available and grants none automatically.
-If a custom skill already uses any declared name, the complete catalog installation fails and
-leaves that custom package unchanged.
+Installation previews until `--confirm`. It makes every skill available and grants none
+automatically; a skill is addressed `<catalog>/<skill>`. If a custom skill already uses any declared
+name, the complete catalog installation fails and leaves that custom package unchanged.
 
 ```sh
 rundesk skills catalogs
 rundesk skills update rundesk-skills-integrations
-rundesk skills remove rundesk-skills-integrations
+rundesk skills remove rundesk-skills-integrations --confirm
 ```
 
 Every update restores the repository's complete package files, including scripts and executable
 permissions. Credentials, caches, and state remain outside those packages. Removal requires
-`--yes` and is refused while any integration skill is granted.
+`--confirm` and is refused while any integration skill is granted.
+
+## Credentials
+
+Each package declares what it needs in its own `rundesk.json` — a variable name for each required
+value, with why it is needed and where to get one:
+
+```sh
+rundesk skills configure          # prompt for each declared value, in the order declared
+rundesk skills profiles           # list the accounts found for each skill
+rundesk skills doctor             # report which declared value is missing
+```
+
+Rundesk stores those values and feeds them to a command as process environment variables. One
+account per suffix, separated by a double underscore, and the plain name is the default account:
+`JIRA_API_TOKEN` is the default site, `JIRA_API_TOKEN__ACME` is the `acme` site. Accounts are found
+by scanning, so adding one is declared nowhere, and a named account never falls back to a plain
+value.
 
 ## Environment model
 
@@ -30,9 +47,13 @@ Every command is self-contained and uses Python's standard library, so installin
 does not create a virtual environment or install a dependency. Credentials and profile routing
 stay outside the catalog:
 
+- Rundesk-managed: the values above, already in the command's environment;
 - isolated default: `${XDG_CONFIG_HOME:-$HOME/.config}/rundesk/integrations/<skill>/env`;
 - shared opt-in: set `RUNDESK_INTEGRATIONS_ENV` to one owner-only dotenv;
 - explicit override: `<SKILL>_ENV_FILE` or the command's `--env-file` option.
+
+A dotenv may use either spelling: Rundesk's `<FIELD>__<ACCOUNT>` or this repository's original
+`<SKILL>_<ACCOUNT>_<FIELD>`, which still resolves so no existing file breaks.
 
 Read [ENVIRONMENTS.md](ENVIRONMENTS.md) for precedence, permissions, migration, cache/state,
 and the contract for building another integration. Maintainers use

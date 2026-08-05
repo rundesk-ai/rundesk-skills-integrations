@@ -15,8 +15,10 @@ Usage:
   jira identify "Fix APP-123" [--all-profiles]
 
 Inputs:
-  Reads process env or an explicit/shared/isolated dotenv. Configure JIRA_<PROFILE>_* keys;
-  see the README ## Provider section and .env.example. Secrets must stay in local .env only.
+  Reads process env or an explicit/shared/isolated dotenv. Rundesk-managed accounts use
+  JIRA_<FIELD>__<PROFILE>, with the plain JIRA_<FIELD> as the default account; the older
+  JIRA_<PROFILE>_<FIELD> keys still resolve. See references/cli.md. Secrets must stay in
+  the process environment or a local dotenv only.
 
 Outputs:
   Writes compact text summaries to stdout. List/search output is CSV-style rows.
@@ -114,9 +116,67 @@ def load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
+# Each plain variable name Rundesk manages, paired with the per-profile suffix this
+# repository has always used, so both spellings resolve to the same field. The keys are
+# exactly the names declared in rundesk.json plus the optional ones a command only uses
+# when present.
+PROFILE_FIELDS = {
+    "JIRA_BASE_URL": "BASE_URL",
+    "JIRA_EMAIL": "EMAIL",
+    "JIRA_API_TOKEN": "API_TOKEN",
+    "JIRA_PROJECTS": "PROJECTS",
+    "JIRA_LABEL": "LABEL",
+}
+REQUIRED_FIELDS = ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN")
+# A Rundesk account suffix: uppercase words joined by single underscores, because a
+# double underscore is what separates the field name from the account name.
+ACCOUNT_SUFFIX_RE = re.compile(r"[A-Z0-9]+(?:_[A-Z0-9]+)*")
+RESERVED_PROFILE_WORDS = frozenset({"DEFAULT", "ENV"})
+
+
+def normalize_profile(profile: str) -> str:
+    """A profile name as an environment-variable fragment: `example-two` to `EXAMPLE_TWO`."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", profile or "").strip("_").upper()
+
+
+def profile_label(suffix: str) -> str:
+    """The inverse of `normalize_profile`, so a discovered account reads as a profile name."""
+    return suffix.lower().replace("_", "-")
+
+
 def env_name(profile: str, suffix: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9]+", "_", profile).strip("_").upper()
-    return f"JIRA_{normalized}_{suffix}"
+    return f"JIRA_{normalize_profile(profile)}_{suffix}"
+
+
+def is_default_profile(profile: str) -> bool:
+    """Rundesk stores the default account under the plain, unsuffixed variable names."""
+    normalized = normalize_profile(profile)
+    if not normalized or normalized == "DEFAULT":
+        return True
+    return normalized == normalize_profile(os.environ.get("JIRA_DEFAULT_PROFILE", ""))
+
+
+def missing_name(profile: str, field: str) -> str:
+    """The variable an owner must set, spelled the way Rundesk stores it."""
+    return field if is_default_profile(profile) else f"{field}__{normalize_profile(profile)}"
+
+
+def profile_value(profile: str, field: str) -> str:
+    """Read one field for one profile.
+
+    Rundesk's `<FIELD>__<PROFILE>` wins, then this repository's `JIRA_<PROFILE>_<FIELD>`,
+    then the plain `<FIELD>` — which belongs to the default account only, so a named
+    account never pairs one site's URL with another site's token.
+    """
+    normalized = normalize_profile(profile)
+    if normalized:
+        for name in (f"{field}__{normalized}", env_name(profile, PROFILE_FIELDS[field])):
+            value = os.environ.get(name, "")
+            if value:
+                return value
+    if not is_default_profile(profile):
+        return ""
+    return os.environ.get(field, "")
 
 
 def split_csv(value: str | None) -> list[str]:
@@ -131,7 +191,48 @@ def configured_profile_names() -> list[str]:
     default = os.environ.get("JIRA_DEFAULT_PROFILE", "")
     if default and default not in names:
         names.insert(0, default)
-    return names
+    return names or discovered_profile_names()
+
+
+def discovered_profile_names() -> list[str]:
+    """Accounts present in the environment, so adding one needs no declaration.
+
+    Both spellings are scanned: Rundesk's `<FIELD>__<ACCOUNT>` suffix and this
+    repository's `JIRA_<PROFILE>_<FIELD>` infix.
+
+    The plain names are one more account — the default one — listed even when only
+    partly configured, so it carries its own error instead of vanishing. It is
+    suppressed when the infix spelling is in use: there a plain value was a fallback
+    shared by every profile, not an account of its own, and inventing one would make
+    every command ambiguous for an owner whose dotenv predates Rundesk.
+    """
+    suffixed: set[str] = set()
+    infixed: set[str] = set()
+    legacy = re.compile(
+        rf"^JIRA_({ACCOUNT_SUFFIX_RE.pattern})_({'|'.join(PROFILE_FIELDS.values())})$"
+    )
+    for key in os.environ:
+        for field in PROFILE_FIELDS:
+            prefix = f"{field}__"
+            if key.startswith(prefix) and ACCOUNT_SUFFIX_RE.fullmatch(key[len(prefix):]):
+                suffixed.add(profile_label(key[len(prefix):]))
+        match = legacy.match(key)
+        if not match:
+            continue
+        word = match.group(1)
+        if word == "DEFAULT":
+            # `<SKILL>_DEFAULT_<FIELD>` is the infix spelling of the default account, not
+            # an account named `default` that resolution would then never find.
+            infixed.add("default")
+        elif word not in RESERVED_PROFILE_WORDS:
+            infixed.add(profile_label(word))
+    names = suffixed | infixed
+    # The plain names are the default account. The infix spelling predates that idea and
+    # treated a plain value as a fallback shared by every profile, so an environment
+    # written that way gets no invented `default` account to make selection ambiguous.
+    if not infixed and any(profile_value("", field) for field in REQUIRED_FIELDS):
+        names.add(os.environ.get("JIRA_DEFAULT_PROFILE") or "default")
+    return sorted(names)
 
 
 def validate_base_url(value: str) -> str:
@@ -178,25 +279,27 @@ def open_url(req: urllib.request.Request, timeout: int):
 
 
 def get_profile(name: str) -> Profile:
-    base_url = os.environ.get(env_name(name, "BASE_URL"), "")
-    email = os.environ.get(env_name(name, "EMAIL"), "")
-    token = os.environ.get(env_name(name, "API_TOKEN"), "")
-    projects = split_csv(os.environ.get(env_name(name, "PROJECTS")))
-    label = os.environ.get(env_name(name, "LABEL"), name)
+    base_url = profile_value(name, "JIRA_BASE_URL")
+    email = profile_value(name, "JIRA_EMAIL")
+    token = profile_value(name, "JIRA_API_TOKEN")
+    projects = split_csv(profile_value(name, "JIRA_PROJECTS"))
+    label = profile_value(name, "JIRA_LABEL") or name
 
-    missing = []
-    if not base_url:
-        missing.append(env_name(name, "BASE_URL"))
-    if not email:
-        missing.append(env_name(name, "EMAIL"))
-    if not token:
-        missing.append(env_name(name, "API_TOKEN"))
+    missing = [
+        missing_name(name, field)
+        for field, value in (
+            ("JIRA_BASE_URL", base_url),
+            ("JIRA_EMAIL", email),
+            ("JIRA_API_TOKEN", token),
+        )
+        if not value
+    ]
 
     if missing:
         raise JiraError(
             "Missing Jira config: "
             + ", ".join(missing)
-            + ". Add it to the secrets dotenv or export it in the shell."
+            + ". Run `rundesk skills configure`, add it to the secrets dotenv, or export it in the shell."
         )
 
     base_url = validate_base_url(base_url)
@@ -590,10 +693,29 @@ def fetch_issue_attachments(profile: Profile, issue_key: str) -> list[Any]:
     return attachments
 
 
+def selected_profile_name(args: argparse.Namespace) -> str:
+    profile_name = getattr(args, "profile", None) or os.environ.get("JIRA_DEFAULT_PROFILE", "")
+    if profile_name:
+        return profile_name
+
+    names = configured_profile_names()
+    if len(names) == 1:
+        return names[0]
+    if names:
+        raise JiraError(
+            "Multiple Jira profiles configured; pass --profile or set JIRA_DEFAULT_PROFILE. "
+            f"Available: {', '.join(names)}"
+        )
+    raise JiraError("No Jira profile selected. Pass --profile or set JIRA_DEFAULT_PROFILE.")
+
+
 def command_profiles(args: argparse.Namespace) -> int:
     names = configured_profile_names()
     if not names:
-        print("No Jira profiles configured. Set JIRA_PROFILES or JIRA_DEFAULT_PROFILE in .env.")
+        print(
+            "No Jira profiles configured. Run `rundesk skills configure`, or set "
+            "JIRA_PROFILES and JIRA_DEFAULT_PROFILE in .env."
+        )
         return 0
 
     print("Jira profiles")
@@ -894,10 +1016,13 @@ def command_identify(args: argparse.Namespace) -> int:
     if args.all_profiles:
         names = configured_profile_names()
         if not names:
-            raise JiraError("No Jira profiles configured. Set JIRA_PROFILES in .env.")
+            raise JiraError(
+                "No Jira profiles configured. Run `rundesk skills configure`, or set "
+                "JIRA_PROFILES in .env."
+            )
         profiles = [get_profile(name) for name in names]
     else:
-        profiles = [get_profile(args.profile)]
+        profiles = [get_profile(selected_profile_name(args))]
 
     print(f"Jira identify | keys={','.join(issue_keys)} profiles={','.join(profile.name for profile in profiles)}")
     for issue_key in issue_keys:
@@ -929,7 +1054,11 @@ def add_common_options(parser: argparse.ArgumentParser, suppress_defaults: bool 
         default=default,
         help="Path to dotenv file. Defaults to the configured shared or isolated Jira env.",
     )
-    parser.add_argument("--profile", default=default, help="Jira profile name from JIRA_<PROFILE>_* env vars.")
+    parser.add_argument(
+        "--profile",
+        default=default,
+        help="Jira account name, from JIRA_<FIELD>__<PROFILE> or JIRA_<PROFILE>_<FIELD> env vars.",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1033,15 +1162,10 @@ def main() -> int:
     env_file = resolve_env_file(getattr(args, "env_file", None))
     load_dotenv(env_file)
 
-    if not getattr(args, "no_profile", False):
-        args.profile = getattr(args, "profile", None) or os.environ.get("JIRA_DEFAULT_PROFILE", "")
-        if not args.profile:
-            print("error: Missing Jira profile. Set JIRA_DEFAULT_PROFILE or pass --profile.", file=sys.stderr)
-            return 1
-
     try:
         if getattr(args, "no_profile", False):
             return args.handler(args)
+        args.profile = selected_profile_name(args)
         profile = get_profile(args.profile)
         return args.handler(args, profile)
     except JiraError as exc:

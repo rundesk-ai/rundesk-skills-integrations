@@ -1,5 +1,6 @@
 """The service integration catalog and every packaged command, entirely offline."""
 
+import importlib.util
 import json
 import os
 import re
@@ -7,11 +8,16 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parent.parent
 ALLOWED = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+# Rundesk accepts a declared variable name only in this shape, and reserves the double
+# underscore as the separator between a field and an account.
+DECLARED_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 class IntegrationCatalog(unittest.TestCase):
@@ -52,6 +58,190 @@ class IntegrationCatalog(unittest.TestCase):
                 self.assertFalse((package / "README.md").exists())
                 self.assertFalse((package / "CHANGELOG.md").exists())
                 self.assertTrue((package / "scripts" / name).is_file())
+
+    def test_every_skill_declares_its_needs_for_rundesk(self):
+        """`rundesk skills configure`, `profiles`, and `doctor` all read this one file."""
+        for entry in self.manifest["skills"]:
+            with self.subTest(skill=entry["name"]):
+                declaration = json.loads(
+                    (ROOT / entry["path"] / "rundesk.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(["needs"], list(declaration))
+                needs = declaration["needs"]
+                self.assertIsInstance(needs, dict)
+                self.assertTrue(needs, "a skill with no declared need cannot be configured")
+                for name, reason in needs.items():
+                    with self.subTest(variable=name):
+                        self.assertRegex(name, DECLARED_NAME)
+                        self.assertNotIn(
+                            "__", name, "the double underscore is Rundesk's account separator"
+                        )
+                        self.assertTrue(name.startswith(entry["name"].upper()))
+                        self.assertIsInstance(reason, str)
+                        # The reason is what a person reads when told the value is missing,
+                        # so it has to say where the value comes from, not restate the name.
+                        self.assertGreater(len(reason), 40)
+                        self.assertNotIn(name, reason)
+
+    def test_declared_needs_match_the_required_fields_each_command_resolves(self):
+        """A declaration the command does not read is a value Rundesk collects for nothing."""
+        for entry in self.manifest["skills"]:
+            with self.subTest(skill=entry["name"]):
+                declaration = json.loads(
+                    (ROOT / entry["path"] / "rundesk.json").read_text(encoding="utf-8")
+                )
+                module = self.load_command(entry)
+                self.assertEqual(
+                    sorted(declaration["needs"]), sorted(module.REQUIRED_FIELDS)
+                )
+                for name in module.REQUIRED_FIELDS:
+                    self.assertIn(name, module.PROFILE_FIELDS)
+
+    def test_every_command_prefers_the_rundesk_account_suffix_over_the_legacy_form(self):
+        """Both spellings resolve; the one Rundesk writes wins, and never leaks across accounts."""
+        for entry in self.manifest["skills"]:
+            with self.subTest(skill=entry["name"]):
+                module = self.load_command(entry)
+                skill = entry["name"].upper()
+                for field in module.REQUIRED_FIELDS:
+                    with self.subTest(field=field):
+                        suffix = module.PROFILE_FIELDS[field]
+                        env = {
+                            f"{field}__ACME": "rundesk-value",
+                            f"{skill}_ACME_{suffix}": "legacy-value",
+                            field: "default-value",
+                        }
+                        with unittest.mock.patch.dict(os.environ, env, clear=True):
+                            self.assertEqual(
+                                "rundesk-value", module.profile_value("acme", field)
+                            )
+                        with unittest.mock.patch.dict(
+                            os.environ, {k: v for k, v in env.items() if "__" not in k},
+                            clear=True,
+                        ):
+                            self.assertEqual(
+                                "legacy-value", module.profile_value("acme", field)
+                            )
+                        with unittest.mock.patch.dict(os.environ, {field: "default-value"},
+                                                      clear=True):
+                            self.assertEqual(
+                                "default-value", module.profile_value("default", field)
+                            )
+                            self.assertEqual("", module.profile_value("acme", field))
+
+    def test_every_command_discovers_a_rundesk_account_without_a_declaration(self):
+        for entry in self.manifest["skills"]:
+            with self.subTest(skill=entry["name"]):
+                module = self.load_command(entry)
+                env = {f"{field}__ACME_TWO": "value" for field in module.REQUIRED_FIELDS}
+                with unittest.mock.patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(["acme-two"], module.configured_profile_names())
+                plain = {field: "value" for field in module.REQUIRED_FIELDS}
+                with unittest.mock.patch.dict(os.environ, plain, clear=True):
+                    self.assertEqual(["default"], module.configured_profile_names())
+
+    def test_no_account_name_is_invented_from_a_double_underscore(self):
+        """The legacy infix scan must not claim a key the account-suffix scan owns."""
+        for entry in self.manifest["skills"]:
+            with self.subTest(skill=entry["name"]):
+                module = self.load_command(entry)
+                skill = entry["name"].upper()
+                for field, suffix in module.PROFILE_FIELDS.items():
+                    with self.subTest(field=field):
+                        # An account whose last word is itself a field suffix is the shape
+                        # that a greedy infix pattern misreads.
+                        with unittest.mock.patch.dict(
+                            os.environ, {f"{field}__ACME_{suffix}": "value"}, clear=True
+                        ):
+                            self.assertEqual(
+                                [module.profile_label(f"ACME_{suffix}")],
+                                module.discovered_profile_names(),
+                            )
+                        with unittest.mock.patch.dict(
+                            os.environ, {f"{skill}_ACME__{suffix}": "value"}, clear=True
+                        ):
+                            self.assertEqual([], module.discovered_profile_names())
+
+    def test_no_plain_declared_name_is_read_as_an_account(self):
+        """`STRIPE_API_KEY` is the default account's key, never an account named `api`."""
+        for entry in self.manifest["skills"]:
+            with self.subTest(skill=entry["name"]):
+                module = self.load_command(entry)
+                aliases = getattr(module, "PLAIN_ALIASES", {})
+                names = set(module.PROFILE_FIELDS)
+                names.update(getattr(module, "SHARED_ATLASSIAN_FIELDS", {}).values())
+                for alias_group in aliases.values():
+                    names.update(alias_group)
+                for name in sorted(names):
+                    with self.subTest(variable=name):
+                        with unittest.mock.patch.dict(
+                            os.environ, {name: "value"}, clear=True
+                        ):
+                            self.assertLessEqual(
+                                set(module.discovered_profile_names()), {"default"}
+                            )
+
+    def test_a_legacy_account_beside_a_plain_value_stays_one_account(self):
+        """Before Rundesk a plain value was every profile's fallback, so inventing a
+        `default` account next to a legacy one would refuse every command as ambiguous."""
+        for entry in self.manifest["skills"]:
+            with self.subTest(skill=entry["name"]):
+                module = self.load_command(entry)
+                skill = entry["name"].upper()
+                env = {field: "value" for field in module.REQUIRED_FIELDS}
+                env.update({
+                    f"{skill}_PROD_{module.PROFILE_FIELDS[field]}": "value"
+                    for field in module.REQUIRED_FIELDS
+                })
+                with unittest.mock.patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(["prod"], module.configured_profile_names())
+                    self.assertEqual(
+                        "prod", module.selected_profile_name(SimpleNamespace(profile=None))
+                    )
+
+    def test_the_default_word_in_the_legacy_infix_names_the_default_account(self):
+        """`<SKILL>_DEFAULT_<FIELD>` resolves, so it must not be dropped from the listing."""
+        for entry in self.manifest["skills"]:
+            with self.subTest(skill=entry["name"]):
+                module = self.load_command(entry)
+                skill = entry["name"].upper()
+                env = {
+                    f"{skill}_DEFAULT_{module.PROFILE_FIELDS[field]}": "value"
+                    for field in module.REQUIRED_FIELDS
+                }
+                with unittest.mock.patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(["default"], module.discovered_profile_names())
+                    for field in module.REQUIRED_FIELDS:
+                        self.assertEqual("value", module.profile_value("default", field))
+
+    def test_explicit_profiles_variable_overrides_discovery_everywhere(self):
+        for entry in self.manifest["skills"]:
+            with self.subTest(skill=entry["name"]):
+                module = self.load_command(entry)
+                skill = entry["name"].upper()
+                env = {f"{skill}_PROFILES": "named"}
+                env.update({f"{field}__ACME": "value" for field in module.REQUIRED_FIELDS})
+                with unittest.mock.patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(["named"], module.configured_profile_names())
+
+    def test_every_launcher_and_script_stays_executable(self):
+        """Rundesk reports a non-executable script as a fault."""
+        for entry in self.manifest["skills"]:
+            scripts = ROOT / entry["path"] / "scripts"
+            for path in sorted(scripts.rglob("*")):
+                if path.is_file() and path.suffix != ".pyc" and "__pycache__" not in path.parts:
+                    with self.subTest(script=path.relative_to(ROOT)):
+                        self.assertTrue(os.access(path, os.X_OK))
+
+    @staticmethod
+    def load_command(entry):
+        """Import one package's implementation module by path, without installing anything."""
+        script = ROOT / entry["path"] / "scripts" / f"{entry['name']}.d" / f"{entry['name']}.py"
+        spec = importlib.util.spec_from_file_location(f"{entry['name']}_command", script)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
 
     def test_readme_lists_exactly_the_declared_skills(self):
         """A catalog that ships a skill its README never mentions is a catalog nobody trusts."""

@@ -1,0 +1,5 @@
+{
+  "needs": {
+    "DISCORD_BOT_TOKEN": "the bot token of your Discord application, from discord.com/developers/applications > your application > Bot > Reset Token; the bot must also be invited to each server it should read, with the Message Content intent enabled"
+  }
+}

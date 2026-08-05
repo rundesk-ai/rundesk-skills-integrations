@@ -19,8 +19,10 @@ Usage:
   cloudflare dns-rm example.com RECORD_ID [--profile example] [--confirm]
 
 Inputs:
-  Reads dotenv outside the Rundesk script library. Configure CLOUDFLARE_PROFILES
-  and CLOUDFLARE_<PROFILE>_* keys; see README. Secrets stay in local .env only.
+  Reads process env or a dotenv outside the Rundesk script library. Rundesk-managed
+  accounts use CLOUDFLARE_<FIELD>__<PROFILE>, with the plain CLOUDFLARE_<FIELD> as the
+  default account; the older CLOUDFLARE_<PROFILE>_<FIELD> keys still resolve. See
+  references/cli.md. Secrets stay in the process environment or a local dotenv only.
 
 Outputs:
   Compact text for agent context. List commands are CSV-style rows.
@@ -157,8 +159,9 @@ class Profile:
             return headers
         raise CloudflareError(
             f"Profile {self.name!r} has no credentials. Set "
-            f"{env_name(self.name, 'TOKEN')} or both "
-            f"{env_name(self.name, 'EMAIL')} and {env_name(self.name, 'GLOBAL_KEY')}."
+            f"{missing_name(self.name, 'CLOUDFLARE_API_TOKEN')} or both "
+            f"{missing_name(self.name, 'CLOUDFLARE_EMAIL')} and "
+            f"{missing_name(self.name, 'CLOUDFLARE_GLOBAL_KEY')}."
         )
 
 
@@ -188,9 +191,101 @@ def load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
+# Each plain variable name Rundesk manages, paired with the per-profile suffix this
+# repository has always used, so both spellings resolve to the same field. The keys are
+# exactly the names declared in rundesk.json plus the optional ones a command only uses
+# when present: the global-key pair is an alternative to the token, the account id is
+# resolved from the API when absent, and the registrant contact is read only by a
+# confirmed `register`.
+PROFILE_FIELDS = {
+    "CLOUDFLARE_API_TOKEN": "TOKEN",
+    "CLOUDFLARE_EMAIL": "EMAIL",
+    "CLOUDFLARE_GLOBAL_KEY": "GLOBAL_KEY",
+    "CLOUDFLARE_ACCOUNT_ID": "ACCOUNT_ID",
+    "CLOUDFLARE_LABEL": "LABEL",
+    "CLOUDFLARE_CONTACT_FIRST_NAME": "CONTACT_FIRST_NAME",
+    "CLOUDFLARE_CONTACT_LAST_NAME": "CONTACT_LAST_NAME",
+    "CLOUDFLARE_CONTACT_ORGANIZATION": "CONTACT_ORGANIZATION",
+    "CLOUDFLARE_CONTACT_ADDRESS": "CONTACT_ADDRESS",
+    "CLOUDFLARE_CONTACT_ADDRESS2": "CONTACT_ADDRESS2",
+    "CLOUDFLARE_CONTACT_CITY": "CONTACT_CITY",
+    "CLOUDFLARE_CONTACT_STATE": "CONTACT_STATE",
+    "CLOUDFLARE_CONTACT_ZIP": "CONTACT_ZIP",
+    "CLOUDFLARE_CONTACT_COUNTRY": "CONTACT_COUNTRY",
+    "CLOUDFLARE_CONTACT_PHONE": "CONTACT_PHONE",
+    "CLOUDFLARE_CONTACT_EMAIL": "CONTACT_EMAIL",
+}
+REQUIRED_FIELDS = ("CLOUDFLARE_API_TOKEN",)
+# Bare names an older dotenv may still use for the default account.
+PLAIN_ALIASES = {
+    "CLOUDFLARE_API_TOKEN": ("CF_API_TOKEN",),
+    "CLOUDFLARE_GLOBAL_KEY": ("CLOUDFLARE_API_KEY",),
+}
+# A Rundesk account suffix: uppercase words joined by single underscores, because a
+# double underscore is what separates the field name from the account name.
+ACCOUNT_SUFFIX_RE = re.compile(r"[A-Z0-9]+(?:_[A-Z0-9]+)*")
+# The same shape, lazily quantified, for the legacy infix scan below. Laziness changes
+# only which split the engine tries first, never which keys match.
+LAZY_ACCOUNT_PATTERN = r"[A-Z0-9]+?(?:_[A-Z0-9]+?)*?"
+# Words the legacy infix must never read as an account name: `API` keeps
+# CLOUDFLARE_API_TOKEN from becoming an account named `api`, and `CONTACT` keeps the plain
+# CLOUDFLARE_CONTACT_EMAIL from becoming one named `contact`.
+RESERVED_PROFILE_WORDS = frozenset({"API", "CONTACT", "DEFAULT"})
+
+
+def normalize_profile(profile: str) -> str:
+    """A profile name as an environment-variable fragment: `example-two` to `EXAMPLE_TWO`."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", profile or "").strip("_").upper()
+
+
+def profile_label(suffix: str) -> str:
+    """The inverse of `normalize_profile`, so a discovered account reads as a profile name."""
+    return suffix.lower().replace("_", "-")
+
+
 def env_name(profile: str, suffix: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9]+", "_", profile).strip("_").upper()
-    return f"CLOUDFLARE_{normalized}_{suffix}"
+    return f"CLOUDFLARE_{normalize_profile(profile)}_{suffix}"
+
+
+def plain_names(field: str) -> tuple[str, ...]:
+    """The unsuffixed names that hold a field for the default account, best first."""
+    return (field,) + PLAIN_ALIASES.get(field, ())
+
+
+def is_default_profile(profile: str) -> bool:
+    """Rundesk stores the default account under the plain, unsuffixed variable names."""
+    normalized = normalize_profile(profile)
+    if not normalized or normalized == "DEFAULT":
+        return True
+    return normalized == normalize_profile(os.environ.get("CLOUDFLARE_DEFAULT_PROFILE", ""))
+
+
+def missing_name(profile: str, field: str) -> str:
+    """The variable an owner must set, spelled the way Rundesk stores it."""
+    return field if is_default_profile(profile) else f"{field}__{normalize_profile(profile)}"
+
+
+def profile_value(profile: str, field: str) -> str:
+    """Read one field for one profile.
+
+    Rundesk's `<FIELD>__<PROFILE>` wins, then this repository's
+    `CLOUDFLARE_<PROFILE>_<FIELD>`, then the plain `<FIELD>` and its legacy aliases —
+    which belong to the default account only, so a named account never pairs one
+    account's identifier with another account's token.
+    """
+    normalized = normalize_profile(profile)
+    if normalized:
+        for name in (f"{field}__{normalized}", env_name(profile, PROFILE_FIELDS[field])):
+            value = os.environ.get(name, "")
+            if value:
+                return value
+    if not is_default_profile(profile):
+        return ""
+    for name in plain_names(field):
+        value = os.environ.get(name, "")
+        if value:
+            return value
+    return ""
 
 
 def split_csv(value: str | None) -> list[str]:
@@ -208,49 +303,68 @@ def configured_profile_names() -> list[str]:
 
 
 def discovered_profile_names() -> list[str]:
-    names: set[str] = set()
-    pattern = re.compile(
-        r"^CLOUDFLARE_([A-Z0-9_]+)_(TOKEN|EMAIL|GLOBAL_KEY|ACCOUNT_ID|LABEL)$"
+    """Accounts present in the environment, so adding one needs no declaration.
+
+    Both spellings are scanned: Rundesk's `<FIELD>__<ACCOUNT>` suffix and this
+    repository's `CLOUDFLARE_<PROFILE>_<FIELD>` infix.
+
+    The plain names are one more account — the default one — listed even when only
+    partly configured, so it carries its own error instead of vanishing. It is
+    suppressed when the infix spelling is in use: there a plain value was a fallback
+    shared by every profile, not an account of its own, and inventing one would make
+    every command ambiguous for an owner whose dotenv predates Rundesk.
+    """
+    suffixed: set[str] = set()
+    infixed: set[str] = set()
+    # The account group is lazy so the longest field suffix wins: CLOUDFLARE_ACME_CONTACT_EMAIL
+    # is account `acme`, never `acme-contact` — EMAIL is an underscore-suffix of
+    # CONTACT_EMAIL, the one such collision in this package's field table.
+    legacy = re.compile(
+        rf"^CLOUDFLARE_({LAZY_ACCOUNT_PATTERN})_({'|'.join(PROFILE_FIELDS.values())})$"
     )
     for key in os.environ:
-        match = pattern.match(key)
+        for field in PROFILE_FIELDS:
+            prefix = f"{field}__"
+            if key.startswith(prefix) and ACCOUNT_SUFFIX_RE.fullmatch(key[len(prefix):]):
+                suffixed.add(profile_label(key[len(prefix):]))
+        match = legacy.match(key)
         if not match:
             continue
-        raw = match.group(1)
-        if raw in {"API", "DEFAULT"}:
-            continue
-        names.add(raw.lower().replace("_", "-"))
-    # Legacy single-token shape
-    if os.environ.get("CLOUDFLARE_API_TOKEN") and not names:
-        names.add(os.environ.get("CLOUDFLARE_DEFAULT_PROFILE", "default") or "default")
+        word = match.group(1)
+        if word == "DEFAULT":
+            # `<SKILL>_DEFAULT_<FIELD>` is the infix spelling of the default account, not
+            # an account named `default` that resolution would then never find.
+            infixed.add("default")
+        elif word not in RESERVED_PROFILE_WORDS:
+            infixed.add(profile_label(word))
+    names = suffixed | infixed
+    # The plain names are the default account. The infix spelling predates that idea and
+    # treated a plain value as a fallback shared by every profile, so an environment
+    # written that way gets no invented `default` account to make selection ambiguous.
+    # The global-key pair is an auth path `get_profile` accepts, so a default account holding
+    # only those two must be listed as well, or `profiles` denies an account that works.
+    plain_auth = any(profile_value("", field) for field in REQUIRED_FIELDS) or (
+        profile_value("", "CLOUDFLARE_EMAIL") and profile_value("", "CLOUDFLARE_GLOBAL_KEY")
+    )
+    if not infixed and plain_auth:
+        names.add(os.environ.get("CLOUDFLARE_DEFAULT_PROFILE") or "default")
     return sorted(names)
 
 
 def get_profile(name: str) -> Profile:
-    token = (
-        os.environ.get(env_name(name, "TOKEN"))
-        or os.environ.get("CLOUDFLARE_API_TOKEN", "")
-        or os.environ.get("CF_API_TOKEN", "")
-    )
-    email = os.environ.get(env_name(name, "EMAIL"), "") or os.environ.get(
-        "CLOUDFLARE_EMAIL", ""
-    )
-    global_key = (
-        os.environ.get(env_name(name, "GLOBAL_KEY"))
-        or os.environ.get("CLOUDFLARE_GLOBAL_KEY", "")
-        or os.environ.get("CLOUDFLARE_API_KEY", "")
-    )
-    account_id = os.environ.get(env_name(name, "ACCOUNT_ID"), "") or os.environ.get(
-        "CLOUDFLARE_ACCOUNT_ID", ""
-    )
-    label = os.environ.get(env_name(name, "LABEL"), name)
+    token = profile_value(name, "CLOUDFLARE_API_TOKEN")
+    email = profile_value(name, "CLOUDFLARE_EMAIL")
+    global_key = profile_value(name, "CLOUDFLARE_GLOBAL_KEY")
+    account_id = profile_value(name, "CLOUDFLARE_ACCOUNT_ID")
+    label = profile_value(name, "CLOUDFLARE_LABEL") or name
 
     if not token and not (email and global_key):
         raise CloudflareError(
             "Missing Cloudflare config: "
-            f"{env_name(name, 'TOKEN')} (preferred) or "
-            f"{env_name(name, 'EMAIL')}+{env_name(name, 'GLOBAL_KEY')}. "
-            "Add to the secrets dotenv or export in the shell."
+            f"{missing_name(name, 'CLOUDFLARE_API_TOKEN')} (preferred) or both "
+            f"{missing_name(name, 'CLOUDFLARE_EMAIL')} and "
+            f"{missing_name(name, 'CLOUDFLARE_GLOBAL_KEY')}. "
+            "Run `rundesk skills configure`, add it to the secrets dotenv, or export it in the shell."
         )
 
     return Profile(
@@ -417,8 +531,10 @@ def selected_profile_name(args: argparse.Namespace) -> str:
         return names[0]
     if not names:
         raise CloudflareError(
-            "No Cloudflare profiles configured. Set CLOUDFLARE_PROFILES and "
-            "CLOUDFLARE_<PROFILE>_TOKEN in local .env."
+            "No Cloudflare profiles configured. Run `rundesk skills configure`, or set "
+            "CLOUDFLARE_API_TOKEN (default account) or CLOUDFLARE_API_TOKEN__<ACCOUNT>, "
+            "or the older CLOUDFLARE_PROFILES with CLOUDFLARE_<PROFILE>_TOKEN, in the "
+            "secrets dotenv."
         )
     raise CloudflareError(
         "Multiple Cloudflare profiles configured; pass --profile. "
@@ -435,11 +551,11 @@ def resolve_account_id(profile: Profile) -> str:
     if not accounts:
         raise CloudflareError(
             f"No Cloudflare accounts visible for profile={profile.name}. "
-            f"Set {env_name(profile.name, 'ACCOUNT_ID')}."
+            f"Set {missing_name(profile.name, 'CLOUDFLARE_ACCOUNT_ID')}."
         )
     raise CloudflareError(
         f"Multiple Cloudflare accounts for profile={profile.name}; set "
-        f"{env_name(profile.name, 'ACCOUNT_ID')}. Visible: "
+        f"{missing_name(profile.name, 'CLOUDFLARE_ACCOUNT_ID')}. Visible: "
         + ", ".join(f"{text(a.get('name'))}:{text(a.get('id'))}" for a in accounts[:10])
     )
 
@@ -802,24 +918,25 @@ def cmd_search_domains(args: argparse.Namespace) -> int:
 
 
 def contact_from_env(profile: Profile) -> dict[str, str]:
+    """The registrant contact, read through both spellings like every other field."""
     mapping = {
-        "first_name": "CONTACT_FIRST_NAME",
-        "last_name": "CONTACT_LAST_NAME",
-        "organization": "CONTACT_ORGANIZATION",
-        "address": "CONTACT_ADDRESS",
-        "address2": "CONTACT_ADDRESS2",
-        "city": "CONTACT_CITY",
-        "state": "CONTACT_STATE",
-        "zip": "CONTACT_ZIP",
-        "country": "CONTACT_COUNTRY",
-        "phone": "CONTACT_PHONE",
-        "email": "CONTACT_EMAIL",
+        "first_name": "CLOUDFLARE_CONTACT_FIRST_NAME",
+        "last_name": "CLOUDFLARE_CONTACT_LAST_NAME",
+        "organization": "CLOUDFLARE_CONTACT_ORGANIZATION",
+        "address": "CLOUDFLARE_CONTACT_ADDRESS",
+        "address2": "CLOUDFLARE_CONTACT_ADDRESS2",
+        "city": "CLOUDFLARE_CONTACT_CITY",
+        "state": "CLOUDFLARE_CONTACT_STATE",
+        "zip": "CLOUDFLARE_CONTACT_ZIP",
+        "country": "CLOUDFLARE_CONTACT_COUNTRY",
+        "phone": "CLOUDFLARE_CONTACT_PHONE",
+        "email": "CLOUDFLARE_CONTACT_EMAIL",
     }
     contact: dict[str, str] = {}
-    for field, suffix in mapping.items():
-        value = os.environ.get(env_name(profile.name, suffix), "").strip()
+    for key, field in mapping.items():
+        value = profile_value(profile.name, field).strip()
         if value:
-            contact[field] = value
+            contact[key] = value
     return contact
 
 
@@ -865,7 +982,8 @@ def cmd_register(args: argparse.Namespace) -> int:
         )
         print(
             "note\tRegistrar purchase also needs contact fields in env "
-            f"({env_name(profile.name, 'CONTACT_FIRST_NAME')}, …) when the API requires them."
+            f"({missing_name(profile.name, 'CLOUDFLARE_CONTACT_FIRST_NAME')}, …) when the "
+            "API requires them."
         )
         return 0
 
@@ -1089,7 +1207,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_profile(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--profile", default=None, help="Cloudflare profile name from .env")
+        p.add_argument(
+            "--profile",
+            default=None,
+            help="Account name, from CLOUDFLARE_<FIELD>__<PROFILE> or CLOUDFLARE_<PROFILE>_<FIELD>",
+        )
         p.add_argument("--json", action="store_true", help="Print raw/structured JSON")
 
     p = sub.add_parser("profiles", help="List configured profiles")

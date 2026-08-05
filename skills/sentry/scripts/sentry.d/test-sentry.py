@@ -87,6 +87,87 @@ class SentryModuleTest(unittest.TestCase):
             args = SimpleNamespace(profile=None)
             self.assertEqual(self.module.selected_profile_name(args), "example-legacy")
 
+    def test_rundesk_account_suffix_wins_over_legacy_profile_keys(self) -> None:
+        env = {
+            "SENTRY_AUTH_TOKEN__EXAMPLE": "rundesk-token",
+            "SENTRY_ORG__EXAMPLE": "rundesk-org",
+            "SENTRY_EXAMPLE_TOKEN": "legacy-token",
+            "SENTRY_EXAMPLE_ORG": "legacy-org",
+            "SENTRY_EXAMPLE_BASE_URL": "https://sentry.example.test",
+            "SENTRY_EXAMPLE_PROJECTS": "example-api",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.configured_profile_names(), ["example"])
+            profile = self.module.get_profile("example")
+
+        self.assertEqual(profile.token, "rundesk-token")
+        self.assertEqual(profile.org, "rundesk-org")
+        self.assertEqual(profile.base_url, "https://sentry.example.test")
+        self.assertEqual(profile.projects, ["example-api"])
+
+    def test_named_account_never_falls_back_to_plain_values(self) -> None:
+        env = {
+            "SENTRY_AUTH_TOKEN": "default-token",
+            "SENTRY_ORG": "default-org",
+            "SENTRY_EXAMPLE_TWO_ORG": "example-two-org",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.profile_value("example-two", "SENTRY_AUTH_TOKEN"), "")
+            self.assertEqual(self.module.profile_value("example-two", "SENTRY_ORG"), "example-two-org")
+            with self.assertRaises(self.module.SentryError) as raised:
+                self.module.get_profile("example-two")
+
+        message = str(raised.exception)
+        self.assertIn("SENTRY_AUTH_TOKEN__EXAMPLE_TWO", message)
+        self.assertNotIn("SENTRY_ORG", message)
+        self.assertNotIn("default-token", message)
+        self.assertIn("rundesk skills configure", message)
+
+    def test_plain_names_alone_configure_one_default_account(self) -> None:
+        env = {"SENTRY_AUTH_TOKEN": "plain-token", "SENTRY_ORG": "example-org"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.configured_profile_names(), ["default"])
+            self.assertEqual(
+                self.module.selected_profile_name(SimpleNamespace(profile=None)), "default"
+            )
+            profile = self.module.get_profile("default")
+
+        self.assertEqual(profile.name, "default")
+        self.assertEqual(profile.token, "plain-token")
+        self.assertEqual(profile.org, "example-org")
+        self.assertEqual(profile.base_url, "https://sentry.io")
+
+    def test_declared_default_profile_owns_the_plain_variable_names(self) -> None:
+        env = {
+            "SENTRY_DEFAULT_PROFILE": "example",
+            "SENTRY_AUTH_TOKEN": "plain-token",
+            "SENTRY_ORG": "example-org",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.configured_profile_names(), ["example"])
+            profile = self.module.get_profile("example")
+
+        self.assertEqual(profile.token, "plain-token")
+        self.assertEqual(profile.org, "example-org")
+
+    def test_legacy_profile_keys_resolve_every_field_unchanged(self) -> None:
+        env = {
+            "SENTRY_EXAMPLE_TWO_LABEL": "Example Two Sentry",
+            "SENTRY_EXAMPLE_TWO_BASE_URL": "https://sentry.example.test",
+            "SENTRY_EXAMPLE_TWO_ORG": "example-two-org",
+            "SENTRY_EXAMPLE_TWO_TOKEN": "legacy-token",
+            "SENTRY_EXAMPLE_TWO_PROJECTS": "example-mobile",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.module.configured_profile_names(), ["example-two"])
+            profile = self.module.get_profile("example-two")
+
+        self.assertEqual(profile.label, "Example Two Sentry")
+        self.assertEqual(profile.base_url, "https://sentry.example.test")
+        self.assertEqual(profile.org, "example-two-org")
+        self.assertEqual(profile.token, "legacy-token")
+        self.assertEqual(profile.projects, ["example-mobile"])
+
     def test_profile_rejects_non_https_or_non_origin_base_urls(self) -> None:
         for base_url in (
             "http://example.sentry.io",

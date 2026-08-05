@@ -39,7 +39,7 @@ This integration is self-contained: its provider contract lives in this referenc
 
 The integration reads Confluence Cloud through Atlassian REST APIs. It does not require browser login state or Atlassian CLI state. It supports multiple profiles through `.env` keys, where one profile maps to one Atlassian site/account credential and its known Confluence spaces.
 
-Confluence may reuse the matching Jira/Atlassian credentials for a profile. Set `CONFLUENCE_<PROFILE>_*` keys only when the Confluence site or account differs from the Jira keys.
+Confluence may reuse the matching Jira/Atlassian credentials for an account, in either spelling, because one Atlassian API token serves both services. Set `CONFLUENCE_*` keys only when the Confluence site or account differs from the Jira keys; a Confluence value always wins over the shared Jira one.
 
 ### Recommended Connection
 
@@ -64,7 +64,42 @@ Keep real tokens in local `.env` only. Never commit them. Restrict the selected 
 
 Every Confluence or reused Jira `BASE_URL` must be an HTTPS origin such as `https://example.atlassian.net`: do not include credentials, a path, query, or fragment.
 
-Recommended local keys when Confluence reuses Jira credentials:
+#### Environment keys
+
+Two spellings resolve, and both may be present at once.
+
+**Rundesk-managed (preferred).** `rundesk skills configure` writes these; `rundesk.json` declares the three required names:
+
+```text
+CONFLUENCE_BASE_URL     the Atlassian site origin, such as https://example.atlassian.net
+CONFLUENCE_EMAIL        the email address the API token belongs to
+CONFLUENCE_API_TOKEN    an Atlassian API token
+```
+
+An account is a `__<ACCOUNT>` suffix on the same name, and the plain name is the **default** account. Optional `CONFLUENCE_SPACES` and `CONFLUENCE_LABEL` follow the same rule. A new account needs no declaration; it is discovered by scanning the environment.
+
+```dotenv
+CONFLUENCE_BASE_URL=https://example.atlassian.net
+CONFLUENCE_EMAIL=agent@example.com
+CONFLUENCE_API_TOKEN=
+CONFLUENCE_SPACES=DOCS,TEAM
+
+CONFLUENCE_BASE_URL__EXAMPLE_TWO=https://example-two.atlassian.net
+CONFLUENCE_EMAIL__EXAMPLE_TWO=agent@example.com
+CONFLUENCE_API_TOKEN__EXAMPLE_TWO=
+CONFLUENCE_SPACES__EXAMPLE_TWO=ENGDOCS,HELP
+CONFLUENCE_LABEL__EXAMPLE_TWO=Example Two Atlassian
+```
+
+The `JIRA_*` twins of `BASE_URL`, `EMAIL`, `API_TOKEN`, and `LABEL` resolve too, so an account configured for the `jira` skill needs no second copy of the credential: `JIRA_API_TOKEN__EXAMPLE_TWO` serves `confluence` unless `CONFLUENCE_API_TOKEN__EXAMPLE_TWO` is set. `SPACES` is Confluence-only.
+
+**This repository's own dotenv keys.** `CONFLUENCE_<PROFILE>_<FIELD>` (and the `JIRA_<PROFILE>_<FIELD>` twin) are read directly by this command, not managed by Rundesk. They are kept so an existing dotenv keeps working, and they lose to the Rundesk spelling for the same account.
+
+Every Confluence spelling is exhausted before the shared Jira twin is consulted, so for one field of one account the order is: `CONFLUENCE_<FIELD>__<ACCOUNT>`, then `CONFLUENCE_<ACCOUNT>_<FIELD>`, then — for the default account only — the plain `CONFLUENCE_<FIELD>`; and only then the same three under `JIRA_`. A Confluence-specific value therefore always wins over the shared Jira one, even a Rundesk-managed one: without that, a site whose Confluence lives on a different host than its Jira would silently read the wrong host.
+
+**A named account never falls back to a plain value**, because that is how one site's URL gets paired with another site's token. The default account is the unnamed one, `default`, or the name in `CONFLUENCE_DEFAULT_PROFILE` / `JIRA_DEFAULT_PROFILE`.
+
+Legacy local keys, when Confluence reuses Jira credentials:
 
 ```dotenv
 JIRA_PROFILES=example,example-two
@@ -97,6 +132,8 @@ CONFLUENCE_EXAMPLE_API_TOKEN=
 CONFLUENCE_EXAMPLE_SPACES=DOCS,TEAM
 ```
 
+`CONFLUENCE_PROFILES` / `JIRA_PROFILES` and `CONFLUENCE_DEFAULT_PROFILE` / `JIRA_DEFAULT_PROFILE` stay the explicit list of accounts `profiles` prints. Leave them unset to let the accounts present in the environment be discovered instead.
+
 ### Output Shape
 
 `list` prints one CSV row per page:
@@ -118,7 +155,7 @@ Confluence tree | profile=example site=Example Docs space=DOCS pages=2
 
 ### Space Mapping Rules
 
-- `CONFLUENCE_<PROFILE>_SPACES` is the source of truth for default searchable spaces.
+- `CONFLUENCE_SPACES__<ACCOUNT>` (or the legacy `CONFLUENCE_<PROFILE>_SPACES`, or the plain `CONFLUENCE_SPACES` for the default account) is the source of truth for default searchable spaces.
 - `search --query` is bounded to configured spaces unless `--space`, `--all-spaces`, or `--cql` is provided.
 - `list` and `tree` require `--space` to avoid broad accidental scans.
 - `tree --root PAGE_ID` uses Confluence's descendants endpoint; rootless `tree --space` builds a hierarchy from pages returned for that space.

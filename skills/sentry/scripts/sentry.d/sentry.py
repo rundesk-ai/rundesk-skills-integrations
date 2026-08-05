@@ -13,9 +13,10 @@ Usage:
   sentry resolve ISSUE_ID_OR_SHORT_ID [--profile example] [--confirm]
 
 Inputs:
-  Reads process env or an explicit/shared/isolated dotenv. Configure SENTRY_PROFILES
-  and SENTRY_<PROFILE>_* keys; see references/cli.md for setup. Secrets must stay in an
-  owner-only environment file.
+  Reads process env or an explicit/shared/isolated dotenv. A Rundesk-managed account appends
+  __<PROFILE> to the plain variable name, such as SENTRY_AUTH_TOKEN__EXAMPLE, with the plain
+  SENTRY_AUTH_TOKEN as the default account; the older SENTRY_<PROFILE>_<FIELD> keys still
+  resolve. See references/cli.md for setup. Secrets must stay in an owner-only environment file.
 
 Outputs:
   Writes compact text summaries to stdout. List/search output is CSV-style rows.
@@ -128,9 +129,69 @@ def load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
+# Each plain variable name Rundesk manages, paired with the per-profile suffix this
+# repository has always used, so both spellings resolve to the same field. The keys are
+# exactly the names declared in rundesk.json plus the optional ones a command only uses
+# when present.
+PROFILE_FIELDS = {
+    "SENTRY_AUTH_TOKEN": "TOKEN",
+    "SENTRY_ORG": "ORG",
+    "SENTRY_BASE_URL": "BASE_URL",
+    "SENTRY_PROJECTS": "PROJECTS",
+    "SENTRY_LABEL": "LABEL",
+}
+REQUIRED_FIELDS = ("SENTRY_AUTH_TOKEN", "SENTRY_ORG")
+# A Rundesk account suffix: uppercase words joined by single underscores, because a
+# double underscore is what separates the field name from the account name.
+ACCOUNT_SUFFIX_RE = re.compile(r"[A-Z0-9]+(?:_[A-Z0-9]+)*")
+# Words that are part of a plain variable name, never an account name: without AUTH, the
+# legacy scan would read SENTRY_AUTH_TOKEN as an account called `auth`.
+RESERVED_PROFILE_WORDS = frozenset({"AUTH", "DEFAULT", "ENV"})
+
+
+def normalize_profile(profile: str) -> str:
+    """A profile name as an environment-variable fragment: `example-two` to `EXAMPLE_TWO`."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", profile or "").strip("_").upper()
+
+
+def profile_label(suffix: str) -> str:
+    """The inverse of `normalize_profile`, so a discovered account reads as a profile name."""
+    return suffix.lower().replace("_", "-")
+
+
 def env_name(profile: str, suffix: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9]+", "_", profile).strip("_").upper()
-    return f"SENTRY_{normalized}_{suffix}"
+    return f"SENTRY_{normalize_profile(profile)}_{suffix}"
+
+
+def is_default_profile(profile: str) -> bool:
+    """Rundesk stores the default account under the plain, unsuffixed variable names."""
+    normalized = normalize_profile(profile)
+    if not normalized or normalized == "DEFAULT":
+        return True
+    return normalized == normalize_profile(os.environ.get("SENTRY_DEFAULT_PROFILE", ""))
+
+
+def missing_name(profile: str, field: str) -> str:
+    """The variable an owner must set, spelled the way Rundesk stores it."""
+    return field if is_default_profile(profile) else f"{field}__{normalize_profile(profile)}"
+
+
+def profile_value(profile: str, field: str) -> str:
+    """Read one field for one profile.
+
+    Rundesk's `<FIELD>__<PROFILE>` wins, then this repository's `SENTRY_<PROFILE>_<FIELD>`,
+    then the plain `<FIELD>` — which belongs to the default account only, so a named
+    account never pairs one organization's URL with another organization's token.
+    """
+    normalized = normalize_profile(profile)
+    if normalized:
+        for name in (f"{field}__{normalized}", env_name(profile, PROFILE_FIELDS[field])):
+            value = os.environ.get(name, "")
+            if value:
+                return value
+    if not is_default_profile(profile):
+        return ""
+    return os.environ.get(field, "")
 
 
 def split_csv(value: str | None) -> list[str]:
@@ -149,16 +210,43 @@ def configured_profile_names() -> list[str]:
 
 
 def discovered_profile_names() -> list[str]:
-    names = set()
-    pattern = re.compile(r"^SENTRY_([A-Z0-9_]+)_(TOKEN|ORG|BASE_URL|PROJECTS|LABEL)$")
+    """Accounts present in the environment, so adding one needs no declaration.
+
+    Both spellings are scanned: Rundesk's `<FIELD>__<ACCOUNT>` suffix and this
+    repository's `SENTRY_<PROFILE>_<FIELD>` infix.
+
+    The plain names are one more account — the default one — listed even when only
+    partly configured, so it carries its own error instead of vanishing. It is
+    suppressed when the infix spelling is in use: there a plain value was a fallback
+    shared by every profile, not an account of its own, and inventing one would make
+    every command ambiguous for an owner whose dotenv predates Rundesk.
+    """
+    suffixed: set[str] = set()
+    infixed: set[str] = set()
+    legacy = re.compile(
+        rf"^SENTRY_({ACCOUNT_SUFFIX_RE.pattern})_({'|'.join(PROFILE_FIELDS.values())})$"
+    )
     for key in os.environ:
-        match = pattern.match(key)
+        for field in PROFILE_FIELDS:
+            prefix = f"{field}__"
+            if key.startswith(prefix) and ACCOUNT_SUFFIX_RE.fullmatch(key[len(prefix):]):
+                suffixed.add(profile_label(key[len(prefix):]))
+        match = legacy.match(key)
         if not match:
             continue
-        raw_name = match.group(1)
-        if raw_name == "AUTH":
-            continue
-        names.add(raw_name.lower().replace("_", "-"))
+        word = match.group(1)
+        if word == "DEFAULT":
+            # `<SKILL>_DEFAULT_<FIELD>` is the infix spelling of the default account, not
+            # an account named `default` that resolution would then never find.
+            infixed.add("default")
+        elif word not in RESERVED_PROFILE_WORDS:
+            infixed.add(profile_label(word))
+    names = suffixed | infixed
+    # The plain names are the default account. The infix spelling predates that idea and
+    # treated a plain value as a fallback shared by every profile, so an environment
+    # written that way gets no invented `default` account to make selection ambiguous.
+    if not infixed and any(profile_value("", field) for field in REQUIRED_FIELDS):
+        names.add(os.environ.get("SENTRY_DEFAULT_PROFILE") or "default")
     return sorted(names)
 
 
@@ -206,23 +294,23 @@ def open_url(req: urllib.request.Request, timeout: int):
 
 
 def get_profile(name: str) -> Profile:
-    token = os.environ.get(env_name(name, "TOKEN")) or os.environ.get("SENTRY_AUTH_TOKEN", "")
-    org = os.environ.get(env_name(name, "ORG"), "")
-    base_url = os.environ.get(env_name(name, "BASE_URL"), "https://sentry.io").rstrip("/")
-    projects = split_csv(os.environ.get(env_name(name, "PROJECTS")))
-    label = os.environ.get(env_name(name, "LABEL"), name)
+    token = profile_value(name, "SENTRY_AUTH_TOKEN")
+    org = profile_value(name, "SENTRY_ORG")
+    base_url = profile_value(name, "SENTRY_BASE_URL") or "https://sentry.io"
+    projects = split_csv(profile_value(name, "SENTRY_PROJECTS"))
+    label = profile_value(name, "SENTRY_LABEL") or name
 
-    missing = []
-    if not token:
-        missing.append(env_name(name, "TOKEN"))
-    if not org:
-        missing.append(env_name(name, "ORG"))
+    missing = [
+        missing_name(name, field)
+        for field, value in (("SENTRY_AUTH_TOKEN", token), ("SENTRY_ORG", org))
+        if not value
+    ]
 
     if missing:
         raise SentryError(
             "Missing Sentry config: "
             + ", ".join(missing)
-            + ". Add it to the secrets dotenv or export it in the shell."
+            + ". Run `rundesk skills configure`, add it to the secrets dotenv, or export it in the shell."
         )
 
     base_url = validate_base_url(base_url)
@@ -754,7 +842,10 @@ def print_event(event: dict[str, Any]) -> None:
 def command_profiles(args: argparse.Namespace) -> int:
     names = configured_profile_names()
     if not names:
-        print("No Sentry profiles configured. Set SENTRY_PROFILES or SENTRY_DEFAULT_PROFILE in .env.")
+        print(
+            "No Sentry profiles configured. Run `rundesk skills configure`, or set "
+            "SENTRY_PROFILES and SENTRY_DEFAULT_PROFILE in .env."
+        )
         return 0
 
     print("Sentry profiles")
@@ -1021,7 +1112,7 @@ def add_profile_option(parser: argparse.ArgumentParser, suppress_defaults: bool 
     parser.add_argument(
         "--profile",
         default=default,
-        help="Sentry profile name from SENTRY_<PROFILE>_* env vars.",
+        help="Sentry account name, from SENTRY_<FIELD>__<PROFILE> or SENTRY_<PROFILE>_<FIELD> env vars.",
     )
 
 

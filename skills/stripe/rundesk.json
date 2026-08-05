@@ -1,0 +1,5 @@
+{
+  "needs": {
+    "STRIPE_API_KEY": "a Stripe restricted key (rk_...) from dashboard.stripe.com, under Developers > API keys > Create restricted key, granting read access to balance, charges, payouts, subscriptions, disputes, and reports. A publishable key (pk_...) cannot read account data."
+  }
+}

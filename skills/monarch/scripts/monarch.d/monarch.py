@@ -25,10 +25,11 @@ Usage:
   monarch undo BATCH [--confirm]
 
 Inputs:
-  Reads process env or an explicit/shared/isolated dotenv. Configure MONARCH_PROFILES
-  and MONARCH_<PROFILE>_* keys; see references/cli.md for setup. Monarch issues no scoped
-  or read-only key, so these values are full account access and must stay in an
-  owner-only environment file.
+  Reads process env or an explicit/shared/isolated dotenv. Rundesk-managed accounts use
+  MONARCH_<FIELD>__<PROFILE>, with the plain MONARCH_<FIELD> as the default account; the
+  older MONARCH_<PROFILE>_<FIELD> keys still resolve. See references/cli.md for setup.
+  Monarch issues no scoped or read-only key, so these values are full account access and
+  must stay in an owner-only environment file.
 
 Outputs:
   Writes compact text summaries to stdout. List output is CSV-style rows, account mask
@@ -453,9 +454,66 @@ def load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
+# Each plain variable name Rundesk manages, paired with the per-profile suffix this
+# repository has always used, so both spellings resolve to the same field. The keys are
+# exactly the names declared in rundesk.json plus the optional ones a command only uses
+# when present.
+PROFILE_FIELDS = {
+    "MONARCH_EMAIL": "EMAIL",
+    "MONARCH_PASSWORD": "PASSWORD",
+    "MONARCH_MFA_SECRET": "MFA_SECRET",
+    "MONARCH_LABEL": "LABEL",
+}
+REQUIRED_FIELDS = ("MONARCH_EMAIL", "MONARCH_PASSWORD")
+# A Rundesk account suffix: uppercase words joined by single underscores, because a
+# double underscore is what separates the field name from the account name.
+ACCOUNT_SUFFIX_RE = re.compile(r"[A-Z0-9]+(?:_[A-Z0-9]+)*")
+RESERVED_PROFILE_WORDS = frozenset({"DEFAULT", "ENV"})
+
+
+def normalize_profile(profile: str) -> str:
+    """A profile name as an environment-variable fragment: `joint-account` to `JOINT_ACCOUNT`."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", profile or "").strip("_").upper()
+
+
+def profile_label(suffix: str) -> str:
+    """The inverse of `normalize_profile`, so a discovered account reads as a profile name."""
+    return suffix.lower().replace("_", "-")
+
+
 def env_name(profile: str, suffix: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9]+", "_", profile).strip("_").upper()
-    return f"MONARCH_{normalized}_{suffix}"
+    return f"MONARCH_{normalize_profile(profile)}_{suffix}"
+
+
+def is_default_profile(profile: str) -> bool:
+    """Rundesk stores the default account under the plain, unsuffixed variable names."""
+    normalized = normalize_profile(profile)
+    if not normalized or normalized == "DEFAULT":
+        return True
+    return normalized == normalize_profile(os.environ.get("MONARCH_DEFAULT_PROFILE", ""))
+
+
+def missing_name(profile: str, field: str) -> str:
+    """The variable an owner must set, spelled the way Rundesk stores it."""
+    return field if is_default_profile(profile) else f"{field}__{normalize_profile(profile)}"
+
+
+def profile_value(profile: str, field: str) -> str:
+    """Read one field for one profile.
+
+    Rundesk's `<FIELD>__<PROFILE>` wins, then this repository's `MONARCH_<PROFILE>_<FIELD>`,
+    then the plain `<FIELD>` — which belongs to the default account only, so a named
+    account never pairs one household's email with another household's password.
+    """
+    normalized = normalize_profile(profile)
+    if normalized:
+        for name in (f"{field}__{normalized}", env_name(profile, PROFILE_FIELDS[field])):
+            value = os.environ.get(name, "")
+            if value:
+                return value
+    if not is_default_profile(profile):
+        return ""
+    return os.environ.get(field, "")
 
 
 def split_csv(value: str | None) -> list[str]:
@@ -473,35 +531,67 @@ def configured_profile_names() -> list[str]:
 
 
 def discovered_profile_names() -> list[str]:
-    names = set()
-    pattern = re.compile(r"^MONARCH_([A-Z0-9_]+)_(EMAIL|PASSWORD|MFA_SECRET|LABEL)$")
+    """Accounts present in the environment, so adding one needs no declaration.
+
+    Both spellings are scanned: Rundesk's `<FIELD>__<ACCOUNT>` suffix and this
+    repository's `MONARCH_<PROFILE>_<FIELD>` infix.
+
+    The plain names are one more account — the default one — listed even when only
+    partly configured, so it carries its own error instead of vanishing. It is
+    suppressed when the infix spelling is in use: there a plain value was a fallback
+    shared by every profile, not an account of its own, and inventing one would make
+    every command ambiguous for an owner whose dotenv predates Rundesk.
+    """
+    suffixed: set[str] = set()
+    infixed: set[str] = set()
+    legacy = re.compile(
+        rf"^MONARCH_({ACCOUNT_SUFFIX_RE.pattern})_({'|'.join(PROFILE_FIELDS.values())})$"
+    )
     for key in os.environ:
-        match = pattern.match(key)
-        if match:
-            names.add(match.group(1).lower().replace("_", "-"))
+        for field in PROFILE_FIELDS:
+            prefix = f"{field}__"
+            if key.startswith(prefix) and ACCOUNT_SUFFIX_RE.fullmatch(key[len(prefix):]):
+                suffixed.add(profile_label(key[len(prefix):]))
+        match = legacy.match(key)
+        if not match:
+            continue
+        word = match.group(1)
+        if word == "DEFAULT":
+            # `<SKILL>_DEFAULT_<FIELD>` is the infix spelling of the default account, not
+            # an account named `default` that resolution would then never find.
+            infixed.add("default")
+        elif word not in RESERVED_PROFILE_WORDS:
+            infixed.add(profile_label(word))
+    names = suffixed | infixed
+    # The plain names are the default account. The infix spelling predates that idea and
+    # treated a plain value as a fallback shared by every profile, so an environment
+    # written that way gets no invented `default` account to make selection ambiguous.
+    if not infixed and any(profile_value("", field) for field in REQUIRED_FIELDS):
+        names.add(os.environ.get("MONARCH_DEFAULT_PROFILE") or "default")
     return sorted(names)
 
 
 def get_profile(name: str) -> Profile:
-    email = os.environ.get(env_name(name, "EMAIL"), "").strip()
-    password = os.environ.get(env_name(name, "PASSWORD"), "")
+    email = profile_value(name, "MONARCH_EMAIL").strip()
+    password = profile_value(name, "MONARCH_PASSWORD")
     missing = [
-        env_name(name, suffix)
-        for suffix, value in (("EMAIL", email), ("PASSWORD", password))
+        missing_name(name, field)
+        for field, value in (("MONARCH_EMAIL", email), ("MONARCH_PASSWORD", password))
         if not value
     ]
     if missing:
         raise MonarchError(
             f"Missing Monarch config for profile {name!r}: {', '.join(missing)}. "
-            "Add it to the integration dotenv or export it in the shell."
+            "Run `rundesk skills configure`, add it to the secrets dotenv, or export it in "
+            "the shell."
         )
 
     return Profile(
         name=name,
         email=email,
         password=password,
-        mfa_secret=os.environ.get(env_name(name, "MFA_SECRET"), "").strip(),
-        label=os.environ.get(env_name(name, "LABEL"), name),
+        mfa_secret=profile_value(name, "MONARCH_MFA_SECRET").strip(),
+        label=profile_value(name, "MONARCH_LABEL") or name,
     )
 
 
@@ -841,8 +931,8 @@ def login(profile: Profile, device: str) -> str:
     if challenged and not profile.mfa_secret:
         raise MonarchError(
             f"Monarch requires multi-factor authentication for profile {profile.name!r}. "
-            f"Set {env_name(profile.name, 'MFA_SECRET')} to the base32 seed from Monarch's "
-            "authenticator setup, then retry."
+            f"Set {missing_name(profile.name, 'MONARCH_MFA_SECRET')} to the base32 seed "
+            "from Monarch's authenticator setup, then retry."
         )
     if challenged:
         # A code computed a moment ago can land in the next 30-second step; answer the
@@ -1262,7 +1352,10 @@ def account_row(item: dict) -> dict:
 def command_profiles(args: argparse.Namespace) -> int:
     names = configured_profile_names()
     if not names:
-        print("No Monarch profiles configured. Set MONARCH_PROFILES or MONARCH_DEFAULT_PROFILE.")
+        print(
+            "No Monarch profiles configured. Run `rundesk skills configure`, or set "
+            "MONARCH_PROFILES and MONARCH_DEFAULT_PROFILE in the integration dotenv."
+        )
         return 0
 
     print("Monarch profiles")
@@ -2323,7 +2416,8 @@ def add_profile_option(parser: argparse.ArgumentParser, suppress_defaults: bool 
     parser.add_argument(
         "--profile",
         default=default,
-        help="Monarch profile name from MONARCH_<PROFILE>_* env vars.",
+        help="Monarch account name, from MONARCH_<FIELD>__<PROFILE> or "
+        "MONARCH_<PROFILE>_<FIELD> env vars.",
     )
 
 

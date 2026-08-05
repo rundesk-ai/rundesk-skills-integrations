@@ -66,9 +66,41 @@ Relevant Sentry token scopes include `project:read` and `event:read`. Resolution
 
 Keep real tokens in local `.env` only. Never commit them. Restrict the selected dotenv file to the owner (`chmod 600 .env`); the CLI warns when group or other permission bits are present.
 
-Every `SENTRY_<PROFILE>_BASE_URL` must be an HTTPS origin such as `https://example.sentry.io`: do not include credentials, a path, query, or fragment.
+Every base URL, in either spelling, must be an HTTPS origin such as `https://example.sentry.io`: do not include credentials, a path, query, or fragment. It is optional and defaults to `https://sentry.io`; set it only for a self-hosted or region-pinned install.
 
-Recommended local keys:
+#### Rundesk-managed keys
+
+`rundesk skills configure` writes these; Rundesk owns their storage and this command only reads them from the process environment. An account is a `__<ACCOUNT>` suffix on the plain variable name, and the plain name **is** the default account. A new account needs no declaration — the command finds it by scanning the environment.
+
+Required, per `rundesk.json`:
+
+```text
+SENTRY_AUTH_TOKEN   Sentry auth token with project, event, and issue read scopes
+SENTRY_ORG          Sentry organization slug
+```
+
+Optional in either spelling: `SENTRY_BASE_URL`, `SENTRY_PROJECTS`, `SENTRY_LABEL`.
+
+```dotenv
+# the default account
+SENTRY_AUTH_TOKEN=
+SENTRY_ORG=example-org
+SENTRY_PROJECTS=example-api,example-web
+
+# a second account named `example-two`
+SENTRY_AUTH_TOKEN__EXAMPLE_TWO=
+SENTRY_ORG__EXAMPLE_TWO=example-two-org
+SENTRY_BASE_URL__EXAMPLE_TWO=https://sentry.example.test
+SENTRY_PROJECTS__EXAMPLE_TWO=example-mobile
+```
+
+A profile name maps to an account suffix by uppercasing it and replacing every non-alphanumeric run with `_`, so `--profile example-two` reads `__EXAMPLE_TWO`.
+
+#### This command's own dotenv keys
+
+These are the older spelling. Rundesk does not manage them; the command reads them by hand from the dotenv it resolves, so they are the way to keep an existing local `.env` working.
+
+Existing local keys keep this shape:
 
 ```dotenv
 SENTRY_PROFILES=example,example-two
@@ -98,7 +130,17 @@ SENTRY_EXAMPLE_LEGACY_PROJECTS=example-legacy-api
 SENTRY_AUTH_TOKEN=
 ```
 
-`SENTRY_AUTH_TOKEN` is a fallback token only. Prefer `SENTRY_<PROFILE>_TOKEN` for multi-profile use.
+#### Resolution order
+
+For one field of one profile, highest precedence first:
+
+1. `<PLAIN_NAME>__<PROFILE>` — the Rundesk-managed account key.
+2. `SENTRY_<PROFILE>_<FIELD>` — this command's own dotenv key.
+3. the plain `<PLAIN_NAME>` — **only when that profile is the default account**.
+
+A profile is the default account when it is unnamed, named `default`, or equal to `SENTRY_DEFAULT_PROFILE`. A named account never falls back to a plain value, so one organization's base URL can never be paired with another organization's token. That is why `SENTRY_AUTH_TOKEN` in the compatibility block above resolves for `example-legacy` — `SENTRY_DEFAULT_PROFILE` names it the default account — and would not resolve for any other profile.
+
+A missing key is reported by its Rundesk spelling (`SENTRY_AUTH_TOKEN__EXAMPLE_TWO`, or the plain `SENTRY_AUTH_TOKEN` for the default account). Values are never printed.
 
 ### Output Shape
 
@@ -125,8 +167,8 @@ agent should state that explicitly in its response.
 ### Project And Organization Rules
 
 - One profile maps to one Sentry organization.
-- `SENTRY_PROFILES` controls multi-org discovery.
-- `SENTRY_<PROFILE>_PROJECTS` is the source of truth for default issue list/search bounds.
+- `SENTRY_PROFILES` is the explicit multi-org override; without it, accounts are discovered from whichever key spelling is present in the environment.
+- The configured projects — `SENTRY_PROJECTS__<PROFILE>` or `SENTRY_<PROFILE>_PROJECTS` — are the source of truth for default issue list/search bounds.
 - `list` and `search` use configured projects by default; pass `--project` one or more times to choose explicit project slugs.
 - Pass `--all-projects` only for a deliberate broad org search.
 - Pass `--all-profiles` only for a deliberate broad multi-org scan.

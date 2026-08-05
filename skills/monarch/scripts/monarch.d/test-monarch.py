@@ -117,7 +117,11 @@ def subcommands(module, parser) -> list:
 
 @contextmanager
 def isolated_home():
-    """Point every credential, session, and state path at a throwaway directory."""
+    """Point every credential, session, and state path at a throwaway directory.
+
+    `MONARCH_DEFAULT_PROFILE` is neutralised too: it decides which account reads the plain
+    variable names, so an ambient value would change what a message names.
+    """
     with tempfile.TemporaryDirectory(prefix="monarch-test-") as temporary:
         root = Path(temporary)
         overrides = {
@@ -125,6 +129,7 @@ def isolated_home():
             "XDG_CONFIG_HOME": str(root / "config"),
             "XDG_STATE_HOME": str(root / "state"),
             "XDG_CACHE_HOME": str(root / "cache"),
+            "MONARCH_DEFAULT_PROFILE": "",
         }
         with patch.dict(os.environ, overrides, clear=False):
             yield root
@@ -197,7 +202,8 @@ class MonarchProfileTest(unittest.TestCase):
         with patch.dict(os.environ, {"MONARCH_HOUSEHOLD_EMAIL": "agent@example.test"}, clear=True):
             with self.assertRaises(self.module.MonarchError) as raised:
                 self.module.get_profile("household")
-        self.assertIn("MONARCH_HOUSEHOLD_PASSWORD", str(raised.exception))
+        self.assertIn("MONARCH_PASSWORD__HOUSEHOLD", str(raised.exception))
+        self.assertNotIn(FIXTURE_PASSWORD, str(raised.exception))
 
     def test_ambiguous_profile_selection_is_refused(self) -> None:
         with patch.dict(os.environ, {"MONARCH_PROFILES": "one,two"}, clear=True):
@@ -211,6 +217,115 @@ class MonarchProfileTest(unittest.TestCase):
         }
         with patch.dict(os.environ, env, clear=True):
             self.assertEqual(["household", "parents"], self.module.discovered_profile_names())
+
+    def test_rundesk_suffix_form_wins_over_the_legacy_form(self) -> None:
+        env = {
+            "MONARCH_EMAIL__HOUSEHOLD": "rundesk@example.test",
+            "MONARCH_PASSWORD__HOUSEHOLD": FIXTURE_PASSWORD,
+            "MONARCH_HOUSEHOLD_EMAIL": "legacy@example.test",
+            "MONARCH_HOUSEHOLD_PASSWORD": "legacy-password",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["household"], self.module.discovered_profile_names())
+            profile = self.module.get_profile("household")
+        self.assertEqual("rundesk@example.test", profile.email)
+        self.assertEqual(FIXTURE_PASSWORD, profile.password)
+
+    def test_a_named_account_never_falls_back_to_the_plain_value(self) -> None:
+        # The plain names belong to the default account. Reading them here would pair one
+        # household's email with another household's password.
+        env = {
+            "MONARCH_EMAIL": "default@example.test",
+            "MONARCH_PASSWORD": FIXTURE_PASSWORD,
+            "MONARCH_EMAIL__PARENTS": "parents@example.test",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual("", self.module.profile_value("parents", "MONARCH_PASSWORD"))
+            with self.assertRaises(self.module.MonarchError) as raised:
+                self.module.get_profile("parents")
+        message = str(raised.exception)
+        self.assertIn("MONARCH_PASSWORD__PARENTS", message)
+        self.assertNotIn(FIXTURE_PASSWORD, message)
+
+    def test_plain_names_alone_are_one_default_account(self) -> None:
+        env = {
+            "MONARCH_EMAIL": "agent@example.test",
+            "MONARCH_PASSWORD": FIXTURE_PASSWORD,
+            "MONARCH_LABEL": "Example Household",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["default"], self.module.configured_profile_names())
+            profile = self.module.get_profile("default")
+        self.assertEqual("agent@example.test", profile.email)
+        self.assertEqual("Example Household", profile.label)
+        self.assertFalse(profile.has_mfa)
+
+    def test_a_partly_configured_default_account_is_listed_not_hidden(self) -> None:
+        with patch.dict(os.environ, {"MONARCH_EMAIL": "agent@example.test"}, clear=True):
+            self.assertEqual(["default"], self.module.configured_profile_names())
+            with self.assertRaises(self.module.MonarchError) as raised:
+                self.module.get_profile("default")
+        self.assertIn("MONARCH_PASSWORD", str(raised.exception))
+        self.assertNotIn("MONARCH_PASSWORD__", str(raised.exception))
+
+    def test_a_lone_default_account_selects_without_a_profile_flag(self) -> None:
+        env = {
+            "MONARCH_EMAIL": "agent@example.test",
+            "MONARCH_PASSWORD": FIXTURE_PASSWORD,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            name = self.module.selected_profile_name(SimpleNamespace(profile=None))
+            self.assertEqual("default", name)
+            profile = self.module.get_profile(name)
+        with isolated_home():
+            path = self.module.session_path(profile)
+        self.assertEqual("session-default.json", path.name)
+
+    def test_the_named_default_profile_reads_the_plain_values(self) -> None:
+        env = {
+            "MONARCH_DEFAULT_PROFILE": "household",
+            "MONARCH_EMAIL": "agent@example.test",
+            "MONARCH_PASSWORD": FIXTURE_PASSWORD,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["household"], self.module.configured_profile_names())
+            profile = self.module.get_profile("household")
+        self.assertEqual("agent@example.test", profile.email)
+
+    def test_the_legacy_form_resolves_beside_a_rundesk_account(self) -> None:
+        env = {
+            "MONARCH_HOUSEHOLD_EMAIL": "legacy@example.test",
+            "MONARCH_HOUSEHOLD_PASSWORD": FIXTURE_PASSWORD,
+            "MONARCH_HOUSEHOLD_MFA_SECRET": RFC6238_SEED,
+            "MONARCH_HOUSEHOLD_LABEL": "Example Household",
+            "MONARCH_EMAIL__PARENTS": "parents@example.test",
+            "MONARCH_PASSWORD__PARENTS": FIXTURE_PASSWORD,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(
+                ["household", "parents"], self.module.configured_profile_names()
+            )
+            legacy = self.module.get_profile("household")
+            rundesk = self.module.get_profile("parents")
+        self.assertEqual("legacy@example.test", legacy.email)
+        self.assertEqual("Example Household", legacy.label)
+        self.assertTrue(legacy.has_mfa)
+        self.assertEqual("parents@example.test", rundesk.email)
+
+    def test_a_reserved_word_is_not_read_as_a_legacy_profile(self) -> None:
+        env = {"MONARCH_ENV_LABEL": "Example Household"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual([], self.module.discovered_profile_names())
+
+    def test_the_default_word_names_the_default_account_rather_than_vanishing(self) -> None:
+        """`MONARCH_DEFAULT_EMAIL` resolves, so it must not be dropped from the listing."""
+        env = {
+            "MONARCH_DEFAULT_EMAIL": "agent@example.test",
+            "MONARCH_DEFAULT_PASSWORD": FIXTURE_PASSWORD,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(["default"], self.module.discovered_profile_names())
+            self.assertEqual("agent@example.test", self.module.get_profile("default").email)
 
     def test_masked_email_hides_the_local_part(self) -> None:
         self.assertEqual("a***@example.test", self.module.mask_email("agent@example.test"))
@@ -239,7 +354,7 @@ class MonarchProfileTest(unittest.TestCase):
             with redirect_stdout(buf):
                 code = self.module.command_profiles(SimpleNamespace())
         self.assertEqual(0, code)
-        self.assertIn("MONARCH_DEMO_EMAIL", buf.getvalue())
+        self.assertIn("MONARCH_EMAIL__DEMO", buf.getvalue())
 
     def test_env_file_permission_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -421,7 +536,7 @@ class MonarchTransportTest(unittest.TestCase):
             with self.assertRaises(self.module.MonarchError) as raised:
                 self.module.login(self.profile, "device-0001")
         message = str(raised.exception)
-        self.assertIn("MONARCH_HOUSEHOLD_MFA_SECRET", message)
+        self.assertIn("MONARCH_MFA_SECRET__HOUSEHOLD", message)
         self.assertNotIn(FIXTURE_PASSWORD, message)
 
     def test_mfa_challenge_is_answered_once_with_a_generated_code(self) -> None:
@@ -1154,7 +1269,7 @@ class MonarchBoundaryTest(unittest.TestCase):
             with redirect_stderr(err), redirect_stdout(io.StringIO()):
                 code = self.module.main(["accounts", "--profile", "demo"])
         self.assertEqual(1, code)
-        self.assertIn("MONARCH_DEMO_EMAIL", err.getvalue())
+        self.assertIn("MONARCH_EMAIL__DEMO", err.getvalue())
         self.assertNotIn("Traceback", err.getvalue())
 
 

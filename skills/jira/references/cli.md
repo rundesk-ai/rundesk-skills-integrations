@@ -63,11 +63,31 @@ For OAuth-style apps, the broad classic read scope is `read:jira-work`. Granular
 
 ### Setup
 
-Keep real tokens in local `.env` only. Never commit them. Restrict the selected dotenv file to the owner (`chmod 600 .env`); the CLI warns when group or other permission bits are present.
+`rundesk.json` declares what this skill needs: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`. `rundesk skills configure` prompts for each, `rundesk skills profiles` lists the accounts it finds, and `rundesk skills doctor` names any value still missing.
 
-Every `JIRA_<PROFILE>_BASE_URL` must be an HTTPS origin such as `https://example.atlassian.net`: do not include credentials, a path, query, or fragment.
+Every base URL must be an HTTPS origin such as `https://example.atlassian.net`: do not include credentials, a path, query, or fragment.
 
-Recommended local keys:
+#### Rundesk-managed keys
+
+Rundesk stores credentials itself and feeds them to the command as process environment variables. One account per suffix, separated by a double underscore; the plain name is the default account:
+
+```dotenv
+JIRA_BASE_URL=https://example.atlassian.net
+JIRA_EMAIL=agent@example.com
+JIRA_API_TOKEN=
+
+JIRA_BASE_URL__EXAMPLE_TWO=https://example-two.atlassian.net
+JIRA_EMAIL__EXAMPLE_TWO=agent@example.com
+JIRA_API_TOKEN__EXAMPLE_TWO=
+```
+
+Accounts are found by scanning for `JIRA_<FIELD>__<ACCOUNT>`, so adding one needs no declaration. `JIRA_API_TOKEN__EXAMPLE_TWO` is the account `example-two`. Optional per-account keys are `JIRA_PROJECTS__<ACCOUNT>` and `JIRA_LABEL__<ACCOUNT>`.
+
+A named account never falls back to a plain value. Without that rule one site's `JIRA_BASE_URL` would silently pair with another site's `JIRA_API_TOKEN`, so a partly configured account reports the key it is missing instead.
+
+#### Dotenv keys this command reads itself
+
+The older per-profile form still resolves, so an existing dotenv keeps working unchanged. It is a file this command reads by hand — Rundesk neither writes nor manages it:
 
 ```dotenv
 JIRA_PROFILES=example,example-two
@@ -85,6 +105,12 @@ JIRA_EXAMPLE_TWO_EMAIL=agent@example.com
 JIRA_EXAMPLE_TWO_API_TOKEN=
 JIRA_EXAMPLE_TWO_PROJECTS=ENG,HELP
 ```
+
+`JIRA_PROFILES` and `JIRA_DEFAULT_PROFILE` stay an explicit override: when `JIRA_PROFILES` is absent the accounts are discovered from either spelling, and `JIRA_DEFAULT_PROFILE` names the account that owns the plain values.
+
+Per field, for one account, the first value found wins: `JIRA_<FIELD>__<ACCOUNT>`, then `JIRA_<ACCOUNT>_<FIELD>`, then the plain `JIRA_<FIELD>` for the default account only.
+
+Keep real tokens in the process environment or a local `.env` only. Never commit them. Restrict the selected dotenv file to the owner (`chmod 600 .env`); the CLI warns when group or other permission bits are present.
 
 ### Output Shape
 
@@ -107,7 +133,7 @@ Attachment bytes are never downloaded by `detail` or `attachments`; those comman
 
 ### Project Mapping Rules
 
-- `JIRA_<PROFILE>_PROJECTS` is the source of truth for default issue searches.
+- The account's project list (`JIRA_PROJECTS__<ACCOUNT>`, or `JIRA_<PROFILE>_PROJECTS`, or the plain `JIRA_PROJECTS` for the default account) is the source of truth for default issue searches.
 - `list` is bounded to configured projects unless `--project` is provided.
 - `search --jql` runs explicit JQL and should stay bounded by project in normal agent use.
 - `identify --all-profiles` uses issue-key prefixes to try matching profiles first, then falls back to other configured profiles.

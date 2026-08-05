@@ -153,17 +153,40 @@ password, MFA seed, session token, authorization header, or raw dotenv contents.
 
 ### Environment keys
 
-| Key | Required | Purpose |
-| --- | --- | --- |
-| `MONARCH_PROFILES` | recommended | Comma-separated profile names, in listing order. |
-| `MONARCH_DEFAULT_PROFILE` | optional | Profile used when `--profile` is absent. |
-| `MONARCH_<PROFILE>_EMAIL` | yes | Monarch account email for that household. |
-| `MONARCH_<PROFILE>_PASSWORD` | yes | Monarch account password. |
-| `MONARCH_<PROFILE>_MFA_SECRET` | when MFA is on | Base32 TOTP seed from Monarch's authenticator setup. |
-| `MONARCH_<PROFILE>_LABEL` | optional | Human-readable household name in output. |
+There are **two spellings, and both resolve.** The first is Rundesk-managed; the second is a
+dotenv this command reads by hand.
 
-A profile name is upper-cased and non-alphanumeric characters become underscores, so profile
-`joint-account` reads `MONARCH_JOINT_ACCOUNT_EMAIL`.
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `MONARCH_EMAIL` | yes | Monarch account email for that household. |
+| `MONARCH_PASSWORD` | yes | Monarch account password. |
+| `MONARCH_MFA_SECRET` | when MFA is on | Base32 TOTP seed from Monarch's authenticator setup. |
+| `MONARCH_LABEL` | optional | Human-readable household name in output. |
+
+`MONARCH_EMAIL` and `MONARCH_PASSWORD` are the two names declared in this package's
+`rundesk.json`. `MONARCH_MFA_SECRET` is deliberately not declared there: the command uses it only
+when the account has an authenticator app enabled.
+
+**1. Rundesk-managed — `MONARCH_<FIELD>__<ACCOUNT>`.** An account name is a *suffix* after a
+double underscore, and the plain, unsuffixed field name is the **default account**. This is what
+`rundesk skills configure` writes, and a new account needs no declaration anywhere — the command
+finds it by scanning for the suffix.
+
+```sh
+# the default account
+MONARCH_EMAIL=agent@example.test
+MONARCH_PASSWORD=synthetic-password
+MONARCH_LABEL=Example Household
+
+# a second account named `parents`
+MONARCH_EMAIL__PARENTS=agent@example.com
+MONARCH_PASSWORD__PARENTS=synthetic-password
+MONARCH_LABEL__PARENTS=Example Parents
+```
+
+**2. This package's own dotenv — `MONARCH_<PROFILE>_<FIELD>`.** The older infix form, kept so an
+existing environment file keeps working. Nothing writes it for you; it is read from the process
+environment or the dotenv paths above.
 
 ```sh
 MONARCH_PROFILES=household,parents
@@ -174,22 +197,44 @@ MONARCH_HOUSEHOLD_PASSWORD=synthetic-password
 MONARCH_HOUSEHOLD_MFA_SECRET=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ
 MONARCH_HOUSEHOLD_LABEL=Example Household
 
-MONARCH_PARENTS_EMAIL=agent@example.test
+MONARCH_PARENTS_EMAIL=agent@example.com
 MONARCH_PARENTS_PASSWORD=synthetic-password
 MONARCH_PARENTS_LABEL=Example Parents
 ```
 
-When no `MONARCH_PROFILES` list is set, profiles are discovered from any `MONARCH_<NAME>_EMAIL`,
-`_PASSWORD`, `_MFA_SECRET`, or `_LABEL` variables present.
+For one field of one profile the order is: `MONARCH_<FIELD>__<PROFILE>`, then
+`MONARCH_<PROFILE>_<FIELD>`, then the plain `MONARCH_<FIELD>`.
+
+**A named account never falls back to a plain value.** The plain names belong to the default
+account only, so a partly configured `parents` is an error naming `MONARCH_PASSWORD__PARENTS`
+rather than a login that quietly pairs one household's email with another household's password.
+"Default account" means no `--profile`, `--profile default`, or the name in
+`MONARCH_DEFAULT_PROFILE`.
+
+A profile name is upper-cased and non-alphanumeric characters become underscores in both forms, so
+profile `joint-account` reads `MONARCH_EMAIL__JOINT_ACCOUNT` or `MONARCH_JOINT_ACCOUNT_EMAIL`.
+
+Two more keys, unchanged:
+
+| Key | Required | Purpose |
+| --- | --- | --- |
+| `MONARCH_PROFILES` | optional | Comma-separated profile names, in listing order. |
+| `MONARCH_DEFAULT_PROFILE` | optional | Profile used when `--profile` is absent. |
+
+When no `MONARCH_PROFILES` list is set, profiles are discovered from the environment: every
+`MONARCH_<FIELD>__<ACCOUNT>` suffix, every legacy `MONARCH_<NAME>_EMAIL`, `_PASSWORD`,
+`_MFA_SECRET`, or `_LABEL`, plus one default account when any plain required name is set. A single
+discovered account is selected without `--profile`; two or more require it.
 
 ### Multi-factor authentication
 
-If the Monarch account has an authenticator app enabled, `MONARCH_<PROFILE>_MFA_SECRET` is
-required. Obtain the seed from Monarch's **Settings → Security → two-factor authentication**
-setup screen: when it shows the QR code there is also a text seed (a base32 string such as
-`GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ`). That seed, not a six-digit code, is what goes in the
-variable. Spacing and case are ignored. If the account is already enrolled and the seed was not
-recorded, re-run the enrolment to be shown a new one.
+If the Monarch account has an authenticator app enabled, `MONARCH_MFA_SECRET__<PROFILE>` — or the
+plain `MONARCH_MFA_SECRET` for the default account, or the legacy
+`MONARCH_<PROFILE>_MFA_SECRET` — is required. Obtain the seed from Monarch's
+**Settings → Security → two-factor authentication** setup screen: when it shows the QR code there
+is also a text seed (a base32 string such as `GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ`). That seed, not a
+six-digit code, is what goes in the variable. Spacing and case are ignored. If the account is
+already enrolled and the seed was not recorded, re-run the enrolment to be shown a new one.
 
 The command computes the code itself with RFC 6238 TOTP from the standard library — SHA-1,
 30-second step, six digits — and never prompts. An agent has no terminal, so a missing seed is a
@@ -208,6 +253,10 @@ Two related cases:
 | --- | --- | --- |
 | `${XDG_CONFIG_HOME:-$HOME/.config}/rundesk/integrations/monarch/session-<profile>.json` | 0600 | `{"token", "device", "saved"}` |
 | `${XDG_STATE_HOME:-$HOME/.local/state}/rundesk/integrations/monarch/device.json` | 0600 | `{"device"}` |
+
+`<profile>` in the session file name is the profile name with anything outside `A-Za-z0-9_-`
+replaced by a hyphen, so an account discovered from the plain variable names caches to
+`session-default.json`.
 
 The session token is a bearer credential, so it lives in the configuration tree, not the cache
 tree that `ENVIRONMENTS.md` reserves for disposable data. The device id is durable, non-secret

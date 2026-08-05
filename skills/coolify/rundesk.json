@@ -1,0 +1,6 @@
+{
+  "needs": {
+    "COOLIFY_BASE_URL": "the origin of your Coolify instance, such as https://coolify.example.com - the host you open the dashboard on, with no /api/v1 path",
+    "COOLIFY_API_TOKEN": "an API token from your Coolify dashboard, under Keys & Tokens > API tokens > Create New Token; the root team token sees every server and resource"
+  }
+}
