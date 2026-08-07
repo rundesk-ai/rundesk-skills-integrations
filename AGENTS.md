@@ -19,7 +19,7 @@ file defines how you build here.
    |---|---|
    | any `SKILL.md` | `writing-skills` |
    | any `.py` under `skills/` | `python-patterns` |
-   | any `test-*.py` or `tests/test_catalog.py` | `python-testing` |
+   | any `test-*.py` or `tests/test_catalog.py` | `python-patterns` (testing) |
    | a new integration package | `building-integration-clis`, then the three above |
    | a pull request | `managing-github` (pull requests) |
    | a version bump, tag, or release | `RELEASING.md`, then `managing-github` (releases) |

@@ -1,8 +1,8 @@
 # Rundesk Integration Skills
 
 Reusable Agent Skills that package guarded service CLIs with their operating guidance and
-offline tests. `manifest.json` is the authoritative list; the [Included skills](#included-skills)
-section below names the same set, and the catalog suite fails when the two disagree.
+offline tests. Rundesk discovers packages under `skills/`; this repository also keeps its
+`manifest.json` index and [Included skills](#included-skills) list aligned for catalog maintenance.
 
 ```sh
 rundesk skills install https://github.com/rundesk-ai/rundesk-skills-integrations
@@ -11,18 +11,21 @@ rundesk skills grant <agent> rundesk-skills-integrations/cloudflare
 ```
 
 Installation previews until `--confirm`. It makes every skill available and grants none
-automatically; a skill is addressed `<catalog>/<skill>`. If a custom skill already uses any declared
-name, the complete catalog installation fails and leaves that custom package unchanged.
+automatically; a skill is addressed `<catalog>/<skill>`. Catalog namespaces let repositories carry
+the same skill name. Use `--as <name>` when one agent must hold two grants that would otherwise
+share a name.
 
 ```sh
 rundesk skills catalogs
-rundesk skills update rundesk-skills-integrations
-rundesk skills remove rundesk-skills-integrations --confirm
+rundesk skills update rundesk-skills-integrations             # preview
+rundesk skills update rundesk-skills-integrations --confirm   # apply
+rundesk skills remove rundesk-skills-integrations             # preview
+rundesk skills remove rundesk-skills-integrations --confirm   # apply
 ```
 
 Every update restores the repository's complete package files, including scripts and executable
 permissions. Credentials, caches, and state remain outside those packages. Removal requires
-`--confirm` and is refused while any integration skill is granted.
+`--confirm`, revokes the catalog's grants, and names every affected agent.
 
 ## Credentials
 
@@ -30,10 +33,13 @@ Each package declares what it needs in its own `rundesk.json` — a variable nam
 value, with why it is needed and where to get one:
 
 ```sh
-rundesk skills configure          # prompt for each declared value, in the order declared
-rundesk skills profiles           # list the accounts found for each skill
-rundesk skills doctor             # report which declared value is missing
+rundesk skills configure rundesk-skills-integrations/jira
+rundesk skills profiles rundesk-skills-integrations/jira
+rundesk skills doctor [<agent>]
 ```
+
+`configure` prompts for one skill's declared values in order. `profiles` lists its configured
+accounts, and `doctor` reports missing values for every grant or for one agent.
 
 Rundesk stores those values and feeds them to a command as process environment variables. One
 account per suffix, separated by a double underscore, and the plain name is the default account:
