@@ -8,8 +8,6 @@ category: providers
 
 ## Entry Point
 
-Bundled command: `$RUNDESK_SKILLS/discord/scripts/discord`.
-
 - `discord profiles`
 - `discord status --profile example`
 - `discord guilds --limit 25`

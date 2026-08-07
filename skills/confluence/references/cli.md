@@ -35,8 +35,6 @@ Default output is compact text for agent context. `list` prints CSV-style page r
 
 ## Provider
 
-This integration is self-contained: its provider contract lives in this reference, not in a separate file or shared folder.
-
 The integration reads Confluence Cloud through Atlassian REST APIs. It does not require browser login state or Atlassian CLI state. It supports multiple profiles through `.env` keys, where one profile maps to one Atlassian site/account credential and its known Confluence spaces.
 
 Confluence may reuse the matching Jira/Atlassian credentials for an account, in either spelling, because one Atlassian API token serves both services. Set `CONFLUENCE_*` keys only when the Confluence site or account differs from the Jira keys; a Confluence value always wins over the shared Jira one.

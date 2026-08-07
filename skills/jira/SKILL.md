@@ -1,13 +1,13 @@
 ---
 name: jira
-description: Read Jira Cloud projects, issues, comments, and attachment metadata with the bundled CLI. Use for Jira, ticket keys, backlogs, project work, comments, or attachments.
+description: Use when the user needs facts from an existing Jira Cloud issue, project, backlog, comment, or attachment, including when they provide only an issue or project key. It supplies account-scoped searches and issue detail. Do not use to plan work generally or to create, edit, transition, or comment on Jira issues.
 ---
 
 # Jira
 
-Run the bundled CLI at `$RUNDESK_SKILLS/jira/scripts/jira`. It loads credentials itself;
-never inspect or print its credential file. Read `references/cli.md` only for setup,
-output, API, or validation details.
+Run `$RUNDESK_SKILLS/jira/scripts/jira`; it resolves credentials itself, so never inspect or print
+their source. Read `references/cli.md` only for setup, environment keys, output fields, API
+behavior, or validation.
 
 Start with `"$RUNDESK_SKILLS/jira/scripts/jira" profiles`. Use each profile's configured
 project allowlist. When an issue prefix is unclear, run:

@@ -1,13 +1,13 @@
 ---
 name: confluence
-description: Read Confluence Cloud spaces, page trees, search results, and bodies with the bundled CLI. Use for Confluence, Atlassian knowledge, internal docs, spaces, pages, runbooks, or specifications.
+description: Use when the user needs facts from an existing Confluence Cloud space, page, runbook, specification, or internal wiki, including when they name only the space or page. It supplies account-scoped search, page trees, and page bodies. Do not use to draft, edit, or publish documentation, or to read Jira issues.
 ---
 
 # Confluence
 
-Run the bundled CLI at `$RUNDESK_SKILLS/confluence/scripts/confluence`. It loads
-credentials itself; never inspect or print its credential file. Read `references/cli.md`
-only for setup, output, API, or validation details.
+Run `$RUNDESK_SKILLS/confluence/scripts/confluence`; it resolves credentials itself, so never
+inspect or print their source. Read `references/cli.md` only for setup, environment keys, output
+fields, API behavior, or validation.
 
 Start with `"$RUNDESK_SKILLS/confluence/scripts/confluence" profiles`. Use each profile's
 configured space allowlist; never infer an account or space from an organization name.
@@ -23,5 +23,6 @@ Use compact and bounded commands:
 ```
 
 Keep searches within configured spaces unless the user deliberately requests a broader
-scan. Use `--json` only when raw structured data is required. The integration is
-read-only.
+scan. Search or list first when the page is unknown; use `page --full` after identifying it or when
+the user explicitly needs its body. Use `--json` only when raw structured data is required. The
+integration is read-only.

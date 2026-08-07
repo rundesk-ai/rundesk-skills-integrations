@@ -8,8 +8,6 @@ category: providers
 
 ## Entry Point
 
-Bundled command: `$RUNDESK_SKILLS/coolify/scripts/coolify`.
-
 - `coolify profiles`
 - `coolify status --profile example`
 - `coolify servers --profile example --limit 25`

@@ -1,12 +1,13 @@
 ---
 name: stripe
-description: Review Stripe accounts and pull revenue, payout, subscription, dispute, and report data with the bundled CLI. Use for balances, payouts, MRR or revenue questions, chargebacks, failed payments, customer billing lookups, month-end or reconciliation reporting, and any task mentioning Stripe, even when the account is not named.
+description: Use when the user needs facts or reconciliation data from a Stripe account, including balances, revenue, payouts, charges, subscriptions, disputes, customers, reports, MRR, chargebacks, or failed payments. It supplies account-scoped reads and requested report artifacts. Do not use to take payments, refund, cancel, pay out, or otherwise change customers, payments, or subscriptions.
 ---
 
 # Stripe
 
-Run the bundled CLI at `$RUNDESK_SKILLS/stripe/scripts/stripe`. It loads credentials itself;
-never inspect or print its credential file.
+Run `$RUNDESK_SKILLS/stripe/scripts/stripe`; it resolves credentials itself, so never inspect or
+print their source. Read `references/cli.md` only for setup, environment keys, connected-account
+routing, output fields, or validation.
 
 Start with `"$RUNDESK_SKILLS/stripe/scripts/stripe" profiles`, then choose the profile whose
 label and account match the task. Never guess a profile when more than one is configured —
@@ -83,6 +84,3 @@ the text output omits, and never paste it into chat or a committed file.
 Reads are bounded by `--limit`. When more records exist than were shown, the command says so
 on stderr — carry that caveat into the answer rather than presenting a partial list as
 complete.
-
-Read `references/cli.md` only for setup, environment keys, connected-account routing, output
-contracts, or validation.

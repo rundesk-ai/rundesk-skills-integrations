@@ -1,13 +1,13 @@
 ---
 name: coolify
-description: Inspect Coolify resources and preview guarded restarts or deploys with the bundled CLI. Use for servers, apps, services, databases, deployments, logs, self-hosted operations, or container status—even when Coolify is not named.
+description: Use when the user needs operational facts or a specifically approved lifecycle action for a server, application, service, database, deployment, log, or environment managed by their Coolify instance, even if they name only the resource. It supplies bounded reads and guarded action previews. Do not use for generic Docker, Kubernetes, or server operations not known to be in Coolify.
 ---
 
 # Coolify
 
-Run the bundled CLI at `$RUNDESK_SKILLS/coolify/scripts/coolify`. It loads credentials
-itself; never inspect or print its credential file. Read `references/cli.md` only for
-setup, output, API, or validation details.
+Run `$RUNDESK_SKILLS/coolify/scripts/coolify`; it resolves credentials itself, so never inspect or
+print their source. Read `references/cli.md` only for setup, environment keys, output fields, API
+behavior, or validation.
 
 Start with:
 

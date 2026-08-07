@@ -188,9 +188,6 @@ exits non-zero.
 
 ## Provider notes
 
-This integration is self-contained: its provider contract lives in this reference, not in a
-separate shared folder.
-
 - Base URL is `https://api.stripe.com/v1`; report CSVs download from `files.stripe.com` and the
   command refuses any other host.
 - Authorization headers are dropped on cross-origin redirects.

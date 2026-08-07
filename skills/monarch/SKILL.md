@@ -1,12 +1,13 @@
 ---
 name: monarch
-description: Read a Monarch Money household with the bundled CLI — accounts, balances, net worth, transactions, categories, budget vs. actual, cashflow, investment holdings — and edit a transaction's category, merchant, or note, set tags, create a category, manage transaction rules, and set a budget amount, each previewing until --confirm and reversible with undo. Use for net worth, spending, "what did we spend on X", budget questions, cashflow or savings rate, a transaction lookup, an account or investment balance, recategorizing or tagging transactions, cleaning up miscategorized spending, and any task mentioning Monarch, even when the household is not named.
+description: Use when the user needs their Monarch Money balances, spending, transactions, cashflow, budget, net worth, or holdings, or asks to correct transaction categorization. It supplies household-scoped reads and guarded cleanup of categories, merchants, notes, tags, rules, and budgets. Do not use for general financial advice, transfers, or changing transaction amounts, dates, accounts, or state.
 ---
 
 # Monarch Money
 
-Run the bundled CLI at `$RUNDESK_SKILLS/monarch/scripts/monarch`. It loads credentials itself;
-never inspect or print its credential file.
+Run `$RUNDESK_SKILLS/monarch/scripts/monarch`; it resolves credentials itself, so never inspect or
+print their source. Read `references/cli.md` only for setup, environment keys, output fields, write
+flags, journal behavior, or validation.
 
 Start with `"$RUNDESK_SKILLS/monarch/scripts/monarch" profiles`, then choose the profile whose
 label matches the task. Never guess a profile when more than one is configured — Monarch profiles
@@ -147,6 +148,5 @@ error naming a field or type. That means **Monarch changed**, not that the house
 — say so, and do not report an empty or zeroed household. An HTTP 401 or 403 after a retry means
 the stored credentials stopped working, again not missing data.
 
-Read `references/cli.md` only for setup, environment keys, MFA, the transport contract, output
-columns, each write command's flags and exit codes, the journal's location and retention, or
-validation.
+Read `references/transport.md` only when maintaining authentication or GraphQL operations, or when
+diagnosing an API schema change.

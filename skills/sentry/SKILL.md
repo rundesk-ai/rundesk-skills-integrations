@@ -1,12 +1,13 @@
 ---
 name: sentry
-description: Inspect Sentry issues and preview guarded resolution with the bundled CLI. Use for production errors, exceptions, event evidence, stack traces, unresolved issues, error IDs, or any task mentioning Sentry.
+description: Use when the user needs to triage a production error, exception, stack trace, event, error ID, or unresolved issue in their Sentry organization. It supplies issue and event evidence plus guarded resolution previews. Do not use for general application debugging, observability design, Sentry SDK configuration, or bulk issue changes.
 ---
 
 # Sentry
 
-Run the bundled CLI at `$RUNDESK_SKILLS/sentry/scripts/sentry`. It loads credentials
-itself; never inspect or print its credential file.
+Run `$RUNDESK_SKILLS/sentry/scripts/sentry`; it resolves credentials itself, so never inspect or
+print their source. Read `references/cli.md` only for setup, environment keys, output fields, API
+behavior, or validation.
 
 Start with `"$RUNDESK_SKILLS/sentry/scripts/sentry" profiles`, then choose the profile
 whose configured projects match the task. Never guess a profile when more than one is
@@ -38,5 +39,3 @@ needed and never paste sensitive values into chat or committed files.
 
 `resolve` is a dry-run without `--confirm`. Never confirm resolution unless the owner
 approves that exact profile and issue.
-
-Read `references/cli.md` only for setup, output contracts, API behavior, or validation.

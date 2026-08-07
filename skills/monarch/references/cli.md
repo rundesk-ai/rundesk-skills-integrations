@@ -267,95 +267,6 @@ Delete the session file to force a fresh login. A cached token is reused until M
 it; on an HTTP 401 or 403 the command discards it, logs in once more, and retries the request
 exactly once.
 
-## Transport contract
-
-Recorded here so a future break is repairable without re-deriving it. **Monarch publishes no
-developer API, so none of this is guaranteed and it may change without notice.** The contract
-was established by reading the current source of the community clients
-(`bradleyseanf/monarchmoneycommunity`, `thedavidweng/monarchmoney-cli`, `eshaffer321/monarch-go`,
-`robcerda/monarch-mcp-server`, and `pulsemcp/mcp-servers`); none of them is imported or vendored,
-and this package is pure standard library.
-
-**Every operation here is attested by two or more of those sources, and none is single-sourced.**
-Where sources conflicted, the majority shape was taken and the alternative discarded: the budget
-mutation appears elsewhere as `SetBudgetAmount` keyed on a `budgetId` this package cannot obtain,
-and `keithah/monarchmoney-ts` renders several operations as top-level arguments where two other
-sources agree on an input object. Nothing in this package rests on that last source.
-
-- Base host is `https://api.monarch.com`. The older `api.monarchmoney.com` is retired and is
-  what produces the widely-reported 404 and 525 login failures.
-- **Login** — `POST https://api.monarch.com/auth/login/`, JSON body
-  `{"username": <email>, "password": …, "trusted_device": true, "supports_mfa": true, "totp": …}`
-  where `totp` is present only when an MFA seed is configured.
-- **Login headers** — `Accept: application/json`, `Content-Type: application/json`,
-  `Client-Platform: web`, a `User-Agent`, `Origin: https://app.monarch.com`,
-  `Referer: https://app.monarch.com/`, and `device-uuid: <stable uuid4>`.
-- **MFA challenge** — HTTP 401 or 403, or an `error_code` of `MFA_REQUIRED` or
-  `EMAIL_OTP_REQUIRED` inside an HTTP 200 body. It is answered by re-posting the same
-  `/auth/login/` URL with `totp` filled in; there is no separate MFA endpoint in use.
-- **Token** — read from `token` at the top level of the login response. A JWT-shaped value is a
-  short-lived feature token rather than a session token and is refused.
-- **Queries** — `POST https://api.monarch.com/graphql` with
-  `{"operationName", "query", "variables"}`, `Authorization: Token <token>`, and the same
-  `device-uuid`. Authorization headers are dropped on cross-origin redirects.
-- **Errors** — GraphQL reports failure inside an HTTP 200 body under `errors`, so a 200 is not
-  success on its own. The command raises with the joined messages.
-
-### Named GraphQL operations
-
-| Command | Operation | Root field |
-| --- | --- | --- |
-| `accounts`, `status`, and name resolution | `GetAccounts` | `accounts` |
-| `networth` | `Common_GetAggregateSnapshots` | `aggregateSnapshots(filters: AggregateSnapshotFilters)` |
-| `networth` fallback | `GetAggregateSnapshots` | same, without the asset/liability split |
-| `transactions` | `GetTransactionsList` | `allTransactions(filters: TransactionFilterInput)` |
-| `categories` | `GetCategories` | `categories` |
-| `budgets` | `Common_GetJointPlanningData` | `budgetData(startMonth:, endMonth:)` |
-| `cashflow` | `Web_GetCashFlowPage` | `aggregates(filters:, fillEmptyValues:)` and `aggregates(filters:, groupBy: ["categoryGroup"])` |
-| `holdings` | `Web_GetHoldings` | `portfolio(input: PortfolioInput)` |
-| `edit`, `tag`, `undo` (resolve and read back) | `GetTransactionDrawer` | `getTransaction(id: UUID!, redirectPosted: Boolean)` |
-| `category create` (resolve `--group`) | `ManageGetCategoryGroups` | `categoryGroups` |
-| `tag` (resolve a tag name) | `GetHouseholdTransactionTags` | `householdTransactionTags(search:, limit:)` |
-| `rules`, `rule create`, `rule delete` | `GetTransactionRules` | `transactionRules` |
-
-Every one of those is a `query`. The mutations are a closed set, held in the `MUTATIONS`
-allowlist; `mutate()` refuses to send anything that is not a value in it, and the offline suite
-asserts both that every mutation document in the module is on the allowlist and that the
-allowlist holds exactly these six:
-
-| Command | Operation | Root field | Input |
-| --- | --- | --- | --- |
-| `edit` | `Web_TransactionDrawerUpdateTransaction` | `updateTransaction(input: UpdateTransactionMutationInput!)` | `{id, category?, name?, notes?}` |
-| `tag` | `Web_SetTransactionTags` | `setTransactionTags(input: SetTransactionTagsInput!)` | `{transactionId, tagIds}` |
-| `category create` | `Web_CreateCategory` | `createCategory(input: CreateCategoryInput!)` | `{group, name, icon}` |
-| `rule create` | `Common_CreateTransactionRuleMutationV2` | `createTransactionRuleV2(input: CreateTransactionRuleInput!)` | `{merchantNameCriteria, setCategoryAction, applyToExistingTransactions}` |
-| `rule delete` | `Common_DeleteTransactionRule` | `deleteTransactionRule(id: ID!)` | a bare `id`, **not** an input object |
-| `budget set` | `Common_UpdateBudgetItem` | `updateOrCreateBudgetItem(input: UpdateOrCreateBudgetItemMutationInput!)` | `{categoryId, amount, timeframe, startDate, applyToFuture}` |
-
-Three things about that table are easy to get wrong and were confirmed against two independent
-community sources each:
-
-- `edit --category` sends **`category`**, not `categoryId`, and `--merchant` sends **`name`**,
-  not `merchant`.
-- `setTransactionTags` **replaces** the whole tag set. `--add`/`--remove` therefore read the
-  current tags first and send the resulting set, rather than a delta.
-- `deleteTransactionRule` takes a bare `$id: ID!`. Wrapping it in an input object is rejected.
-
-`applyToExistingTransactions` and `applyToFuture` are both pinned to `false`. Either one set true
-would turn a single-item command into a write over an unbounded number of records.
-
-**Mutations report failure twice over.** Beyond the top-level `errors` every GraphQL response can
-carry, each mutation payload has its own `errors` field shaped
-`PayloadError { message, code, fieldErrors { field, messages } }`. A populated one inside an HTTP
-200 with no top-level error is still a refused write, and `mutate()` raises on it. Some
-`deleteTransactionRule` responses omit `deleted` on success, so only an explicit `deleted: false`
-is treated as a failure.
-
-`aggregateSnapshots` is requested with `assetsBalance` and `liabilitiesBalance` first. Those two
-fields are attested by only one community source, so if the server rejects them by name the
-command retries once with the two-source-attested `date`/`balance` shape, notes on stderr that
-the split is unavailable, and prints `-` in those columns.
-
 ## Output contract
 
 List commands print CSV-style rows with a header. `status` prints tab-separated `key<TAB>value`
@@ -443,9 +354,6 @@ To smoke-test the write path without changing anything, run any write **without*
 it resolves the targets, prints the before/after table, and sends no mutation.
 
 ## Provider notes
-
-This integration is self-contained: its provider contract lives in this reference, not in a
-separate shared folder.
 
 - **Stability.** The API is unofficial and undocumented. Field names, operation names, and the
   login flow can change without notice, and a change surfaces as a GraphQL error naming a field

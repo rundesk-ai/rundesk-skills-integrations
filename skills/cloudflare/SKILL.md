@@ -1,13 +1,13 @@
 ---
 name: cloudflare
-description: Manage Cloudflare domains, zones, registrar checks, and guarded DNS changes with the bundled CLI. Use for DNS records, domain ownership or availability, registration, nameservers, or zone configuration—even when Cloudflare is not named.
+description: Use when the user needs to inspect or change DNS, nameservers, zone configuration, or the availability, ownership, or registration of a domain in their Cloudflare account, even if Cloudflare is unnamed. It supplies account-scoped zone and Registrar reads plus guarded change previews. Do not use for general domain research or server configuration unrelated to Cloudflare.
 ---
 
 # Cloudflare
 
-Run the bundled CLI at `$RUNDESK_SKILLS/cloudflare/scripts/cloudflare`. It loads
-credentials itself; never inspect or print its credential file. Read `references/cli.md`
-only for setup, output, API, or validation details.
+Run `$RUNDESK_SKILLS/cloudflare/scripts/cloudflare`; it resolves credentials itself, so never
+inspect or print their source. Read `references/cli.md` only for setup, environment keys, output
+fields, API behavior, or validation.
 
 Start with:
 

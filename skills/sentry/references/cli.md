@@ -42,8 +42,6 @@ Do not run `resolve --confirm` as a smoke test unless the owner approves the exa
 
 ## Provider
 
-This integration is self-contained: its detailed provider contract lives in this reference, not in a separate shared folder.
-
 The integration reads Sentry directly through the Sentry REST API. It does not require browser login state or Sentry CLI state. It supports multiple profiles through `.env` keys, where one profile maps to one Sentry organization, base URL, token, and default project slug list.
 
 ### Recommended Connection

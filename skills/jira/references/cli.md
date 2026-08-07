@@ -40,8 +40,6 @@ Do not run `attachment --output --confirm` as a smoke test unless the owner conf
 
 ## Provider
 
-This integration is self-contained: its provider contract lives in this reference, not in a separate file or shared folder.
-
 The integration reads Jira Cloud through the Atlassian REST API. It does not require browser login state or Atlassian CLI state. It supports multiple profiles through `.env` keys, where one profile maps to one Atlassian site/account credential and its known Jira project keys.
 
 ### Recommended Connection

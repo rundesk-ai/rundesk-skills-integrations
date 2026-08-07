@@ -1,13 +1,13 @@
 ---
 name: discord
-description: Read and write Discord from the command line with the bundled CLI — post a message, reply, direct message, read channel history, list servers, channels and threads, add reactions, attach files. Use whenever a Discord message, channel, thread, server or conversation history is involved, including posting an update or report to a chat room, catching up on what was said, or messaging a person—even when Discord is not named.
+description: Use when the user asks to catch up on, find, or communicate in a Discord server, channel, thread, or DM, including an established Discord destination described without naming the service. It supplies bounded conversation reads and guarded messages, replies, DMs, reactions, threads, and attachments. Do not use for another chat service or a message with no Discord destination.
 ---
 
 # Discord
 
-Run the bundled CLI at `$RUNDESK_SKILLS/discord/scripts/discord`. It loads the bot token
-itself; never inspect or print its credential file. Read `references/cli.md` only for
-setup, output, API, or validation details.
+Run `$RUNDESK_SKILLS/discord/scripts/discord`; it resolves the bot token itself, so never inspect or
+print its source. Read `references/cli.md` only for setup, environment keys, output fields, API
+behavior, or validation.
 
 Start with:
 
