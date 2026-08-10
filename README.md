@@ -78,5 +78,8 @@ and the contract for building another integration. Maintainers use
   capped in bulk, and is reversible through the package's own undo journal. No command can change an
   amount, a date, or an account, split a transaction, or delete a transaction or a category.
 - `sentry` — projects, issue evidence, event inspection, and guarded resolution previews.
+- `slack-fetch` — accessible channel and DM discovery, bounded timestamped message history, search,
+  and complete thread reads through Slack's read-only Web API methods; it never reuses or extracts
+  a desktop or browser session.
 - `stripe` — balances, revenue, payouts, subscriptions, disputes, and reports. Read-only apart
   from creating a report artifact.
