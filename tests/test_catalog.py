@@ -31,7 +31,7 @@ class IntegrationCatalog(unittest.TestCase):
         self.assertRegex(self.manifest["version"], r"^\d+\.\d+\.\d+$")
         declared = {entry["name"]: entry["path"] for entry in self.manifest["skills"]}
         self.assertEqual(
-            {"cloudflare", "confluence", "coolify", "discord", "jira", "monarch", "sentry", "stripe"},
+            {"cloudflare", "confluence", "coolify", "discord", "jira", "monarch", "sentry", "slack-fetch", "stripe"},
             set(declared),
         )
         self.assertEqual(
@@ -76,7 +76,8 @@ class IntegrationCatalog(unittest.TestCase):
                         self.assertNotIn(
                             "__", name, "the double underscore is Rundesk's account separator"
                         )
-                        self.assertTrue(name.startswith(entry["name"].upper()))
+                        skill_prefix = entry["name"].upper().replace("-", "_")
+                        self.assertTrue(name.startswith(skill_prefix))
                         self.assertIsInstance(reason, str)
                         # The reason is what a person reads when told the value is missing,
                         # so it has to say where the value comes from, not restate the name.
@@ -102,7 +103,7 @@ class IntegrationCatalog(unittest.TestCase):
         for entry in self.manifest["skills"]:
             with self.subTest(skill=entry["name"]):
                 module = self.load_command(entry)
-                skill = entry["name"].upper()
+                skill = entry["name"].upper().replace("-", "_")
                 for field in module.REQUIRED_FIELDS:
                     with self.subTest(field=field):
                         suffix = module.PROFILE_FIELDS[field]
@@ -145,7 +146,7 @@ class IntegrationCatalog(unittest.TestCase):
         for entry in self.manifest["skills"]:
             with self.subTest(skill=entry["name"]):
                 module = self.load_command(entry)
-                skill = entry["name"].upper()
+                skill = entry["name"].upper().replace("-", "_")
                 for field, suffix in module.PROFILE_FIELDS.items():
                     with self.subTest(field=field):
                         # An account whose last word is itself a field suffix is the shape
@@ -187,7 +188,7 @@ class IntegrationCatalog(unittest.TestCase):
         for entry in self.manifest["skills"]:
             with self.subTest(skill=entry["name"]):
                 module = self.load_command(entry)
-                skill = entry["name"].upper()
+                skill = entry["name"].upper().replace("-", "_")
                 env = {field: "value" for field in module.REQUIRED_FIELDS}
                 env.update({
                     f"{skill}_PROD_{module.PROFILE_FIELDS[field]}": "value"
@@ -204,7 +205,7 @@ class IntegrationCatalog(unittest.TestCase):
         for entry in self.manifest["skills"]:
             with self.subTest(skill=entry["name"]):
                 module = self.load_command(entry)
-                skill = entry["name"].upper()
+                skill = entry["name"].upper().replace("-", "_")
                 env = {
                     f"{skill}_DEFAULT_{module.PROFILE_FIELDS[field]}": "value"
                     for field in module.REQUIRED_FIELDS
@@ -218,7 +219,7 @@ class IntegrationCatalog(unittest.TestCase):
         for entry in self.manifest["skills"]:
             with self.subTest(skill=entry["name"]):
                 module = self.load_command(entry)
-                skill = entry["name"].upper()
+                skill = entry["name"].upper().replace("-", "_")
                 env = {f"{skill}_PROFILES": "named"}
                 env.update({f"{field}__ACME": "value" for field in module.REQUIRED_FIELDS})
                 with unittest.mock.patch.dict(os.environ, env, clear=True):
@@ -332,6 +333,9 @@ class IntegrationCatalog(unittest.TestCase):
             "sentry": [
                 "SENTRY_PROFILES=demo", "SENTRY_DEMO_TOKEN=synthetic-token",
                 "SENTRY_DEMO_ORG=example", "SENTRY_DEMO_BASE_URL=https://sentry.example.test",
+            ],
+            "slack-fetch": [
+                "SLACK_PROFILES=demo", "SLACK_DEMO_TOKEN=synthetic-token",
             ],
             "stripe": [
                 "STRIPE_PROFILES=demo", "STRIPE_DEMO_KEY=rk_test_synthetic",

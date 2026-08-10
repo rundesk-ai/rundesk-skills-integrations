@@ -1,0 +1,5 @@
+{
+  "needs": {
+    "SLACK_FETCH_TOKEN": "a least-privilege user OAuth token from the owner-approved Slack app's OAuth & Permissions page, with search and conversation-history read scopes"
+  }
+}
