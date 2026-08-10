@@ -218,7 +218,7 @@ def get_profile(name: str) -> Profile:
     channels = tuple(value.upper() for value in split_csv(profile_value(name, "SLACK_FETCH_CHANNELS")))
     invalid_channels = sorted(value for value in channels if not CHANNEL_RE.fullmatch(value))
     if invalid_channels:
-        raise SlackError("Slack channel allowlist contains invalid conversation IDs.")
+        raise SlackError("Slack channel discovery filter contains invalid conversation IDs.")
     return Profile(
         name=name,
         token=token,
@@ -420,7 +420,7 @@ def search_messages(profile: Profile, query: str, limit: int) -> tuple[list[dict
                 raise SlackError("Slack search pagination repeated a cursor; refusing an incomplete loop.")
             seen_cursors.add(cursor)
             continue
-        if page >= page_count or not matches:
+        if page >= page_count:
             break
         page += 1
     return results[:limit], provider_has_more
