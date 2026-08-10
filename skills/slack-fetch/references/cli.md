@@ -9,7 +9,7 @@ the owner's app authorization choices, and risk exposing credentials. Browser UI
 also outside this read-only contract because opening a conversation can advance Slack read state.
 
 Have a Slack workspace owner approve or create an app for this read-only use, install it to the
-workspace, and issue a **user OAuth token** with only the scopes needed for the conversations Cole
+workspace, and issue a **user OAuth token** with only the scopes needed for the conversations the agent
 may read:
 
 ```text
@@ -34,8 +34,10 @@ The command also accepts the established local profile shape
 `SLACK_<PROFILE>_TOKEN`, `SLACK_<PROFILE>_LABEL`, `SLACK_<PROFILE>_TYPES`, and
 `SLACK_<PROFILE>_CHANNELS`. `TYPES` is a comma-separated subset of
 `public_channel,private_channel,mpim,im`; blank means all four. `CHANNELS` is an optional
-comma-separated allowlist of channel IDs; blank means every conversation the token can
-read. Rundesk-managed configuration uses the canonical `SLACK_FETCH_*` names instead.
+comma-separated channel-ID filter; blank shows every conversation the token can read. These values
+narrow `channels` discovery only; they are not an authorization boundary for direct `messages`,
+`search`, or `thread` reads. Slack OAuth scopes and the signed-in user's workspace access define
+the content boundary. Rundesk-managed configuration uses the canonical `SLACK_FETCH_*` names instead.
 
 Configure the token at the owner's terminal, never in chat or a repository:
 

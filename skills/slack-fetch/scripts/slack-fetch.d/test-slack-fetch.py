@@ -47,39 +47,34 @@ class SlackModuleTest(unittest.TestCase):
                             "user": "U00000000",
                             "text": "Synthetic result one",
                             "permalink": "https://example.slack.com/archives/C00000000/p1700000001000001",
-                        },
-                        {
-                            "channel": {"id": "C00000000", "name": "example"},
-                            "ts": "1700000002.000002",
-                            "user": "U00000001",
-                            "text": "Synthetic result two",
-                            "permalink": "https://example.slack.com/archives/C00000000/p1700000002000002",
-                        },
-                    ]
+                        }
+                    ],
+                    "pagination": {"page": 1, "page_count": 2},
                 },
             }
 
         with patch.object(self.module, "api_call", side_effect=fake_call):
-            results = self.module.search_messages(self.profile, "synthetic in:#example", 1)
+            results, has_more = self.module.search_messages(self.profile, "synthetic in:#example", 1)
 
         self.assertEqual(1, len(results))
+        self.assertTrue(has_more)
         self.assertEqual("1700000000.000000", results[0]["thread_ts"])
         self.assertEqual("search.messages", calls[0][0])
         self.assertEqual(1, calls[0][1]["count"])
 
     def test_exact_legacy_profile_shape_is_discovered_and_parsed(self) -> None:
         env = {
-            "SLACK_TUCKMGMTINC_LABEL": "Tuck Mgmt Inc",
-            "SLACK_TUCKMGMTINC_TOKEN": "synthetic-token",
-            "SLACK_TUCKMGMTINC_TYPES": "public_channel,private_channel,mpim,im",
-            "SLACK_TUCKMGMTINC_CHANNELS": "",
+            "SLACK_EXAMPLECO_LABEL": "Example Workspace",
+            "SLACK_EXAMPLECO_TOKEN": "synthetic-token",
+            "SLACK_EXAMPLECO_TYPES": "public_channel,private_channel,mpim,im",
+            "SLACK_EXAMPLECO_CHANNELS": "",
         }
 
         with patch.dict(os.environ, env, clear=True):
-            self.assertEqual(["tuckmgmtinc"], self.module.configured_profile_names())
-            profile = self.module.get_profile("tuckmgmtinc")
+            self.assertEqual(["exampleco"], self.module.configured_profile_names())
+            profile = self.module.get_profile("exampleco")
 
-        self.assertEqual("Tuck Mgmt Inc", profile.label)
+        self.assertEqual("Example Workspace", profile.label)
         self.assertEqual("synthetic-token", profile.token)
         self.assertEqual(
             {"public_channel", "private_channel", "mpim", "im"},
@@ -125,6 +120,15 @@ class SlackModuleTest(unittest.TestCase):
         payload = self.module.json.loads(output.getvalue())
         self.assertEqual("Full detail", payload["channels"][0]["topic"]["value"])
 
+        warning = io.StringIO()
+        with patch.object(self.module, "list_conversations", return_value=(channels[:1], True)), \
+                redirect_stdout(io.StringIO()), redirect_stderr(warning):
+            self.module.print_channels(
+                self.profile,
+                self.module.SimpleNamespace(limit=1, json=False),
+            )
+        self.assertIn("truncated", warning.getvalue())
+
     def test_message_history_is_bounded_and_outputs_timestamps(self) -> None:
         page = {
             "ok": True,
@@ -152,23 +156,59 @@ class SlackModuleTest(unittest.TestCase):
 
         text_output = io.StringIO()
         json_output = io.StringIO()
+        text_error = io.StringIO()
+        json_error = io.StringIO()
         args = self.module.SimpleNamespace(
             channel="C00000000", limit=2, oldest=None, latest=None, json=False
         )
         with patch.object(self.module, "message_history", return_value=(messages, True)), \
-                redirect_stdout(text_output):
+                redirect_stdout(text_output), redirect_stderr(text_error):
             self.module.print_messages(self.profile, args)
         args.json = True
         with patch.object(self.module, "message_history", return_value=(messages, True)), \
-                redirect_stdout(json_output):
+                redirect_stdout(json_output), redirect_stderr(json_error):
             self.module.print_messages(self.profile, args)
 
         self.assertIn("ts=1700000000.000000", text_output.getvalue())
         self.assertIn("First message", text_output.getvalue())
+        self.assertIn("truncated", text_error.getvalue())
+        self.assertIn("truncated", json_error.getvalue())
         payload = self.module.json.loads(json_output.getvalue())
+        self.assertTrue(payload["has_more"])
         self.assertEqual([{"type": "section"}], payload["messages"][0]["blocks"])
 
-    def test_channel_allowlist_filters_listing_and_refuses_history(self) -> None:
+    def test_search_discloses_truncation_in_text_and_json(self) -> None:
+        results = [{
+            "channel": {"id": "C00000000", "name": "example"},
+            "ts": "1700000001.000001",
+            "user": "U00000000",
+            "text": "Synthetic result",
+            "permalink": "https://example.slack.com/archives/C00000000/p1700000001000001",
+            "metadata": {"preserved": True},
+        }]
+        args = self.module.SimpleNamespace(query="synthetic", limit=1, json=False)
+        text_output = io.StringIO()
+        text_error = io.StringIO()
+        with patch.object(self.module, "search_messages", return_value=(results, True)), \
+                redirect_stdout(text_output), redirect_stderr(text_error):
+            self.module.print_search(self.profile, args)
+
+        self.assertIn("more=yes", text_output.getvalue())
+        self.assertIn("truncated", text_error.getvalue())
+
+        args.json = True
+        json_output = io.StringIO()
+        json_error = io.StringIO()
+        with patch.object(self.module, "search_messages", return_value=(results, True)), \
+                redirect_stdout(json_output), redirect_stderr(json_error):
+            self.module.print_search(self.profile, args)
+
+        payload = self.module.json.loads(json_output.getvalue())
+        self.assertTrue(payload["has_more"])
+        self.assertTrue(payload["matches"][0]["metadata"]["preserved"])
+        self.assertIn("truncated", json_error.getvalue())
+
+    def test_channel_setting_filters_discovery_but_not_direct_reads(self) -> None:
         profile = self.module.Profile(
             "example",
             "synthetic-token",
@@ -186,9 +226,15 @@ class SlackModuleTest(unittest.TestCase):
         with patch.object(self.module, "api_call", return_value=page):
             channels, _ = self.module.list_conversations(profile, 10)
         self.assertEqual(["C00000000"], [item["id"] for item in channels])
-        with self.assertRaises(self.module.SlackError) as raised:
-            self.module.message_history(profile, "C00000001", 10)
-        self.assertIn("allowlist", str(raised.exception))
+        history = {
+            "ok": True,
+            "messages": [{"ts": "1700000000.000000", "text": "Direct read"}],
+            "response_metadata": {"next_cursor": ""},
+        }
+        with patch.object(self.module, "api_call", return_value=history) as call:
+            messages, _ = self.module.message_history(profile, "C00000001", 10)
+        self.assertEqual("Direct read", messages[0]["text"])
+        self.assertEqual("conversations.history", call.call_args.args[1])
 
     def test_search_encodes_query_without_putting_it_in_headers(self) -> None:
         captured = {}

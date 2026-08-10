@@ -299,7 +299,7 @@ def conversation_type(conversation: dict[str, Any]) -> str:
     return "public_channel"
 
 
-def channel_is_allowed(profile: Profile, channel_id: str) -> bool:
+def channel_matches_discovery_filter(profile: Profile, channel_id: str) -> bool:
     if not profile.channels:
         return True
     allowed = {value.upper() for value in profile.channels}
@@ -323,17 +323,16 @@ def list_conversations(profile: Profile, limit: int) -> tuple[list[dict[str, Any
             },
         )
         page = payload.get("channels") if isinstance(payload.get("channels"), list) else []
-        for item in page:
-            if not isinstance(item, dict):
-                continue
-            channel_id = str(item.get("id") or "")
-            if channel_is_allowed(profile, channel_id):
-                conversations.append(item)
-                if len(conversations) >= limit:
-                    break
+        matching = [
+            item for item in page
+            if isinstance(item, dict)
+            and channel_matches_discovery_filter(profile, str(item.get("id") or ""))
+        ]
+        remaining = limit - len(conversations)
+        conversations.extend(matching[:remaining])
         metadata = payload.get("response_metadata")
         next_cursor = str(metadata.get("next_cursor") or "") if isinstance(metadata, dict) else ""
-        provider_has_more = bool(next_cursor)
+        provider_has_more = bool(next_cursor or len(matching) > remaining)
         if not next_cursor or len(conversations) >= limit:
             break
         if next_cursor in seen_cursors:
@@ -352,8 +351,6 @@ def message_history(
 ) -> tuple[list[dict[str, Any]], bool]:
     if not CHANNEL_RE.fullmatch(channel):
         raise SlackError("Channel must be a Slack conversation ID beginning with C, D, or G.")
-    if not channel_is_allowed(profile, channel):
-        raise SlackError("Channel is outside this Slack profile's configured allowlist.")
     for label, value in (("oldest", oldest), ("latest", latest)):
         if value and not TS_RE.fullmatch(value):
             raise SlackError(f"--{label} must use Slack's seconds.microseconds timestamp format.")
@@ -375,10 +372,12 @@ def message_history(
             },
         )
         page = payload.get("messages") if isinstance(payload.get("messages"), list) else []
-        messages.extend(item for item in page if isinstance(item, dict))
+        valid_page = [item for item in page if isinstance(item, dict)]
+        remaining = limit - len(messages)
+        messages.extend(valid_page[:remaining])
         metadata = payload.get("response_metadata")
         next_cursor = str(metadata.get("next_cursor") or "") if isinstance(metadata, dict) else ""
-        provider_has_more = bool(next_cursor or payload.get("has_more"))
+        provider_has_more = bool(next_cursor or payload.get("has_more") or len(valid_page) > remaining)
         if not next_cursor or len(messages) >= limit:
             break
         if next_cursor in seen_cursors:
@@ -388,7 +387,7 @@ def message_history(
     return messages[:limit], provider_has_more
 
 
-def search_messages(profile: Profile, query: str, limit: int) -> list[dict[str, Any]]:
+def search_messages(profile: Profile, query: str, limit: int) -> tuple[list[dict[str, Any]], bool]:
     if not query.strip():
         raise SlackError("Search query cannot be empty.")
     if len(query) > 500 or any(ord(char) < 32 and char not in "\t" for char in query):
@@ -397,6 +396,7 @@ def search_messages(profile: Profile, query: str, limit: int) -> list[dict[str, 
     cursor = ""
     seen_cursors: set[str] = set()
     page = 1
+    provider_has_more = False
     while len(results) < limit:
         payload = api_call(
             profile,
@@ -405,11 +405,16 @@ def search_messages(profile: Profile, query: str, limit: int) -> list[dict[str, 
         )
         messages = payload.get("messages") if isinstance(payload.get("messages"), dict) else {}
         matches = messages.get("matches") if isinstance(messages.get("matches"), list) else []
-        results.extend(item for item in matches if isinstance(item, dict))
+        valid_matches = [item for item in matches if isinstance(item, dict)]
+        remaining = limit - len(results)
+        results.extend(valid_matches[:remaining])
         response_metadata = payload.get("response_metadata")
         cursor = str(response_metadata.get("next_cursor") or "") if isinstance(response_metadata, dict) else ""
         pagination = messages.get("pagination") if isinstance(messages.get("pagination"), dict) else {}
         page_count = int(pagination.get("page_count") or page)
+        provider_has_more = bool(cursor or page < page_count or len(valid_matches) > remaining)
+        if len(results) >= limit:
+            break
         if cursor:
             if cursor in seen_cursors:
                 raise SlackError("Slack search pagination repeated a cursor; refusing an incomplete loop.")
@@ -418,7 +423,7 @@ def search_messages(profile: Profile, query: str, limit: int) -> list[dict[str, 
         if page >= page_count or not matches:
             break
         page += 1
-    return results[:limit]
+    return results[:limit], provider_has_more
 
 
 def parse_permalink(value: str) -> tuple[str, str]:
@@ -500,6 +505,11 @@ def print_status(profile: Profile, as_json: bool) -> None:
 
 def print_channels(profile: Profile, args: argparse.Namespace) -> None:
     conversations, has_more = list_conversations(profile, args.limit)
+    if has_more:
+        print(
+            f"WARNING: Slack channels were truncated at --limit {args.limit}; more results are available.",
+            file=sys.stderr,
+        )
     if args.json:
         print(json.dumps({
             "profile": profile.name,
@@ -527,6 +537,11 @@ def print_messages(profile: Profile, args: argparse.Namespace) -> None:
         oldest=args.oldest or "",
         latest=args.latest or "",
     )
+    if has_more:
+        print(
+            f"WARNING: Slack messages were truncated at --limit {args.limit}; more results are available.",
+            file=sys.stderr,
+        )
     if args.json:
         print(json.dumps({
             "profile": profile.name,
@@ -548,11 +563,25 @@ def print_messages(profile: Profile, args: argparse.Namespace) -> None:
 
 
 def print_search(profile: Profile, args: argparse.Namespace) -> None:
-    results = search_messages(profile, args.query, args.limit)
+    results, has_more = search_messages(profile, args.query, args.limit)
+    if has_more:
+        print(
+            f"WARNING: Slack search results were truncated at --limit {args.limit}; more results are available.",
+            file=sys.stderr,
+        )
     if args.json:
-        print(json.dumps({"profile": profile.name, "count": len(results), "matches": results}, indent=2))
+        print(json.dumps({
+            "profile": profile.name,
+            "count": len(results),
+            "limit": args.limit,
+            "has_more": has_more,
+            "matches": results,
+        }, indent=2))
         return
-    print(f"Slack search | profile={profile.name} matches={len(results)} limit={args.limit}")
+    print(
+        f"Slack search | profile={profile.name} matches={len(results)} "
+        f"limit={args.limit} more={'yes' if has_more else 'no'}"
+    )
     for index, raw in enumerate(results, 1):
         item = normalize_match(raw)
         channel = item["channel_name"] or item["channel_id"] or "unknown"
