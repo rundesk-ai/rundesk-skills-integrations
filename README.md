@@ -4,6 +4,11 @@ Reusable Agent Skills that package guarded service CLIs with their operating gui
 offline tests. Rundesk discovers packages under `skills/`; this repository also keeps its
 `manifest.json` index and [Included skills](#included-skills) list aligned for catalog maintenance.
 
+## Install with Rundesk CLI
+
+Rundesk CLI is the default installation path. It manages updates, grants, credential declarations,
+profiles, executable files, and package health without placing secrets in the catalog.
+
 ```sh
 rundesk skills install https://github.com/rundesk-ai/rundesk-skills-integrations
 rundesk skills install https://github.com/rundesk-ai/rundesk-skills-integrations --confirm
@@ -26,6 +31,29 @@ rundesk skills remove rundesk-skills-integrations --confirm   # apply
 Every update restores the repository's complete package files, including scripts and executable
 permissions. Credentials, caches, and state remain outside those packages. Removal requires
 `--confirm`, revokes the catalog's grants, and names every affected agent.
+
+## Use without Rundesk
+
+Rundesk is not required, but copy or symlink each complete package so `SKILL.md`, references,
+`rundesk.json`, launchers, and implementations remain together. For Codex, use `.agents/skills/` in
+a repository or `~/.agents/skills/` for personal use. For Claude Code, use `.claude/skills/` in a
+project or `~/.claude/skills/` for personal use.
+
+```sh
+# Codex project skill
+mkdir -p .agents/skills
+cp -R /path/to/rundesk-skills-integrations/skills/stripe .agents/skills/
+
+# Claude Code project skill
+mkdir -p .claude/skills
+cp -R /path/to/rundesk-skills-integrations/skills/stripe .claude/skills/
+```
+
+Direct copying does not configure credentials or profiles. Follow each package's
+`references/cli.md` and [ENVIRONMENTS.md](ENVIRONMENTS.md), preserve executable bits, and provide the
+documented environment variables through your own secret-management process. Restart or begin a new
+session if the skill is not detected. Review an existing same-name destination before replacing it
+so an update cannot retain stale package files.
 
 ## Credentials
 
@@ -83,3 +111,15 @@ and the contract for building another integration. Maintainers use
   a desktop or browser session.
 - `stripe` — balances, revenue, payouts, subscriptions, disputes, and reports. Read-only apart
   from creating a report artifact.
+
+## Rundesk Skills collection
+
+| Catalog | Purpose |
+|---|---|
+| [rundesk-skills](https://github.com/rundesk-ai/rundesk-skills) | General guidance and software-development workflows |
+| [rundesk-skills-gamedev](https://github.com/rundesk-ai/rundesk-skills-gamedev) | Game design, production, C++, 2D systems, and Axmol |
+| [rundesk-skills-apple](https://github.com/rundesk-ai/rundesk-skills-apple) | Guarded local Apple integrations for macOS |
+| [rundesk-skills-integrations](https://github.com/rundesk-ai/rundesk-skills-integrations) | Guarded service integration CLIs |
+
+Standalone layout details: [Codex skills](https://learn.chatgpt.com/docs/build-skills) and
+[Claude Code skills](https://code.claude.com/docs/en/slash-commands).
