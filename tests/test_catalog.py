@@ -31,7 +31,7 @@ class IntegrationCatalog(unittest.TestCase):
         self.assertRegex(self.manifest["version"], r"^\d+\.\d+\.\d+$")
         declared = {entry["name"]: entry["path"] for entry in self.manifest["skills"]}
         self.assertEqual(
-            {"cloudflare", "confluence", "coolify", "discord", "jira", "monarch", "sentry", "slack-fetch", "stripe"},
+            {"cloudflare", "confluence", "coolify", "discord", "grafana", "jira", "monarch", "sentry", "slack-fetch", "stripe"},
             set(declared),
         )
         self.assertEqual(

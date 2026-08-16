@@ -99,6 +99,8 @@ and the contract for building another integration. Maintainers use
 - `confluence` — spaces, trees, search, and page content.
 - `coolify` — servers, resources, deployments, logs, and guarded operational changes.
 - `discord` — servers, channels, threads, history, and guarded messages, replies, and reactions.
+- `grafana` — read-only Grafana Loki discovery, labels, bounded LogQL searches, filters, and error
+  investigation through Grafana's authenticated data-source proxy.
 - `jira` — projects, issues, comments, and attachment metadata.
 - `monarch` — Monarch Money accounts, net worth, transactions, budgets, cashflow, and holdings,
   plus guarded edits to a transaction's category, merchant, notes, and tags, category creation,
