@@ -48,7 +48,8 @@ PR_HEADINGS = tuple("""## Summary
 ## Validation
 ## Repository gates
 ## Release
-## Manual user path""".splitlines())
+## Manual user path
+## Agent""".splitlines())
 ISSUE_TEMPLATE_CONTRACTS = {
     "bug-report.md": (
         ("name: Bug report", "about: Report reproducible incorrect behavior",
@@ -158,6 +159,7 @@ class IntegrationCatalog(unittest.TestCase):
     def test_repository_templates_follow_the_contract(self):
         pull_request = ROOT / ".github" / "pull_request_template.md"
         self.assertEqual(PR_HEADINGS, self.markdown_headings(pull_request))
+        self.assertIn("🤖 by <Agent>", pull_request.read_text(encoding="utf-8"))
         pull_request_text = pull_request.read_text(encoding="utf-8")
         normalized_pull_request = " ".join(pull_request_text.split())
         for anchor in PR_CHECKLIST_ANCHORS:
