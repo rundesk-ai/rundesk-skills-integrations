@@ -26,9 +26,12 @@ file defines how you build here.
 
    An agent that does not hold one of these skills still follows the rule; say in your report which
    ones you could not load, because silence reads as compliance.
-3. **Check whether an existing package already owns the service** before adding one. Extend it
+3. **Use `.github/pull_request_template.md` for every pull request.** Preserve its headings and
+   checklists. Mark an item complete only from evidence observed for the exact head commit; explain
+   any item that is not applicable.
+4. **Check whether an existing package already owns the service** before adding one. Extend it
    rather than shipping a second integration for the same API.
-4. When the owner raises a concern, investigate before contradicting — evidence, not a hunch.
+5. When the owner raises a concern, investigate before contradicting — evidence, not a hunch.
 
 ## Hard gates — require explicit approval
 
