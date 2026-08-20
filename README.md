@@ -9,6 +9,8 @@ declarations, and offline tests. Every skill is an independently installable run
 - `confluence` - spaces, trees, search, and page content.
 - `coolify` - servers, resources, deployments, logs, and guarded operational changes.
 - `discord` - servers, channels, threads, history, and guarded messages, replies, and reactions.
+- `grafana` - read-only Grafana Loki discovery, labels, bounded LogQL searches, filters, and error
+  investigation through Grafana's authenticated data-source proxy.
 - `jira` - projects, issues, comments, and attachment metadata.
 - `monarch` - financial accounts, transactions, budgets, cash flow, and holdings; guarded edits to a
   transaction's category, merchant, notes, and tags; category creation; transaction-rule creation

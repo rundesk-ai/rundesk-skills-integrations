@@ -1,0 +1,6 @@
+{
+  "needs": {
+    "GRAFANA_BASE_URL": "the HTTPS origin of your Grafana instance, such as the URL shown in the browser before /explore or /dashboards",
+    "GRAFANA_SERVICE_ACCOUNT_TOKEN": "a Grafana service-account token with Viewer or narrower data-source read and query permissions"
+  }
+}
