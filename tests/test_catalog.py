@@ -211,7 +211,7 @@ class IntegrationCatalog(unittest.TestCase):
         self.assertRegex(self.manifest["version"], r"^\d+\.\d+\.\d+$")
         declared = {entry["name"]: entry["path"] for entry in self.manifest["skills"]}
         self.assertEqual(
-            {"cloudflare", "confluence", "coolify", "discord", "grafana", "jira", "monarch", "sentry", "slack-fetch", "stripe"},
+            {"cloudflare", "confluence", "coolify", "discord", "grafana", "jira", "monarch", "posthog", "sentry", "slack-fetch", "stripe"},
             set(declared),
         )
         self.assertEqual(
@@ -508,6 +508,10 @@ class IntegrationCatalog(unittest.TestCase):
             "monarch": [
                 "MONARCH_PROFILES=demo", "MONARCH_DEMO_EMAIL=agent@example.test",
                 "MONARCH_DEMO_PASSWORD=synthetic-password",
+            ],
+            "posthog": [
+                "POSTHOG_PROFILES=demo", "POSTHOG_DEMO_KEY=synthetic-token",
+                "POSTHOG_DEMO_PROJECT_ID=12345", "POSTHOG_DEMO_BASE_URL=https://us.posthog.com",
             ],
             "sentry": [
                 "SENTRY_PROFILES=demo", "SENTRY_DEMO_TOKEN=synthetic-token",
