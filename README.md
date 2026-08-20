@@ -1,127 +1,141 @@
 # Rundesk Integration Skills
 
-Reusable Agent Skills that package guarded service CLIs with their operating guidance and
-offline tests. Rundesk discovers packages under `skills/`; this repository also keeps its
-`manifest.json` index and [Included skills](#included-skills) list aligned for catalog maintenance.
+Reusable Agent Skills that package guarded service CLIs with their operating guidance, credential
+declarations, and offline tests. Every skill is an independently installable runtime.
 
-## Install with Rundesk CLI
+## Skills
 
-Rundesk CLI is the default installation path. It manages updates, grants, credential declarations,
-profiles, executable files, and package health without placing secrets in the catalog.
+- `cloudflare` - zones, domains, registrar checks, and guarded DNS or domain changes.
+- `confluence` - spaces, trees, search, and page content.
+- `coolify` - servers, resources, deployments, logs, and guarded operational changes.
+- `discord` - servers, channels, threads, history, and guarded messages, replies, and reactions.
+- `grafana` - read-only Grafana Loki discovery, labels, bounded LogQL searches, filters, and error
+  investigation through Grafana's authenticated data-source proxy.
+- `jira` - projects, issues, comments, and attachment metadata.
+- `monarch` - financial accounts, transactions, budgets, cash flow, and holdings; guarded edits to a
+  transaction's category, merchant, notes, and tags; category creation; transaction-rule creation
+  and deletion; budget setting; and undo. It cannot change a transaction's amount, date, or account,
+  delete a transaction or category, or split a transaction.
+- `sentry` - projects, issue evidence, event inspection, and guarded resolution previews.
+- `slack-fetch` - read-only channel and direct-message discovery, bounded message history, search,
+  and complete thread reads through Slack's Web API.
+- `stripe` - balances, revenue, payouts, subscriptions, disputes, and reports, with writes limited to
+  creating a report artifact.
+
+## Install
+
+Rundesk CLI installs the complete catalog and keeps credentials, profiles, caches, and state outside
+the package tree. Installation grants no skill automatically.
 
 ```sh
 rundesk skills install https://github.com/rundesk-ai/rundesk-skills-integrations
 rundesk skills install https://github.com/rundesk-ai/rundesk-skills-integrations --confirm
-rundesk skills grant <agent> rundesk-skills-integrations/cloudflare
+rundesk skills grant agent-name rundesk-skills-integrations/cloudflare
 ```
 
-Installation previews until `--confirm`. It makes every skill available and grants none
-automatically; a skill is addressed `<catalog>/<skill>`. Catalog namespaces let repositories carry
-the same skill name. Use `--as <name>` when one agent must hold two grants that would otherwise
-share a name.
+The first install command previews the exact change; `--confirm` applies it. Skills use the verified
+`<catalog>/<skill>` grant syntax. Updates and removal follow the same preview-first contract:
 
 ```sh
-rundesk skills catalogs
-rundesk skills update rundesk-skills-integrations             # preview
-rundesk skills update rundesk-skills-integrations --confirm   # apply
-rundesk skills remove rundesk-skills-integrations             # preview
-rundesk skills remove rundesk-skills-integrations --confirm   # apply
+rundesk skills update rundesk-skills-integrations
+rundesk skills update rundesk-skills-integrations --confirm
+rundesk skills remove rundesk-skills-integrations
+rundesk skills remove rundesk-skills-integrations --confirm
 ```
 
-Every update restores the repository's complete package files, including scripts and executable
-permissions. Credentials, caches, and state remain outside those packages. Removal requires
-`--confirm`, revokes the catalog's grants, and names every affected agent.
-
-## Use without Rundesk
-
-Rundesk is not required, but copy or symlink each complete package so `SKILL.md`, references,
-`rundesk.json`, launchers, and implementations remain together. For Codex, use `.agents/skills/` in
-a repository or `~/.agents/skills/` for personal use. For Claude Code, use `.claude/skills/` in a
-project or `~/.claude/skills/` for personal use.
-
-```sh
-# Codex project skill
-mkdir -p .agents/skills
-cp -R /path/to/rundesk-skills-integrations/skills/stripe .agents/skills/
-
-# Claude Code project skill
-mkdir -p .claude/skills
-cp -R /path/to/rundesk-skills-integrations/skills/stripe .claude/skills/
-```
-
-Direct copying does not configure credentials or profiles. Follow each package's
-`references/cli.md` and [ENVIRONMENTS.md](ENVIRONMENTS.md), preserve executable bits, and provide the
-documented environment variables through your own secret-management process. Restart or begin a new
-session if the skill is not detected. Review an existing same-name destination before replacing it
-so an update cannot retain stale package files.
-
-## Credentials
-
-Each package declares what it needs in its own `rundesk.json` — a variable name for each required
-value, with why it is needed and where to get one:
+Configure one package's declared values and inspect its profiles without exposing secret values:
 
 ```sh
 rundesk skills configure rundesk-skills-integrations/jira
 rundesk skills profiles rundesk-skills-integrations/jira
-rundesk skills doctor [<agent>]
+rundesk skills doctor agent-name
 ```
 
-`configure` prompts for one skill's declared values in order. `profiles` lists its configured
-accounts, and `doctor` reports missing values for every grant or for one agent.
+To use a package without Rundesk, copy or symlink its complete `skills/<name>/` directory into the
+skill directory supported by the agent runtime. Preserve `rundesk.json`, references, scripts, and
+executable bits, and provide documented variables through your own secret manager.
 
-Rundesk stores those values and feeds them to a command as process environment variables. One
-account per suffix, separated by a double underscore, and the plain name is the default account:
-`JIRA_API_TOKEN` is the default site, `JIRA_API_TOKEN__ACME` is the `acme` site. Accounts are found
-by scanning, so adding one is declared nowhere, and a named account never falls back to a plain
-value.
+## Requirements
 
-## Environment model
+- Python 3.9+ and the standard library. No package manager, virtual environment, or shared runtime is
+  required.
+- Credentials required by the chosen service, declared by variable name in its package-local
+  `rundesk.json`. Never put secret values in the catalog, issue, logs, or command output.
+- Explicit profile selection when more than one account is configured. A named account never falls
+  back to plain default-account credentials.
 
-Every command is self-contained and uses Python's standard library, so installing this catalog
-does not create a virtual environment or install a dependency. Credentials and profile routing
-stay outside the catalog:
+Commands resolve process variables, explicit and package-specific env files, the opt-in
+`RUNDESK_INTEGRATIONS_ENV`, isolated config, and supported legacy config in the exact order defined by
+[ENVIRONMENTS.md](ENVIRONMENTS.md). That document also defines profile spellings, file permissions,
+migration behavior, cache, and state.
 
-- Rundesk-managed: the values above, already in the command's environment;
-- isolated default: `${XDG_CONFIG_HOME:-$HOME/.config}/rundesk/integrations/<skill>/env`;
-- shared opt-in: set `RUNDESK_INTEGRATIONS_ENV` to one owner-only dotenv;
-- explicit override: `<SKILL>_ENV_FILE` or the command's `--env-file` option.
+## Repository layout
 
-A dotenv may use either spelling: Rundesk's `<FIELD>__<ACCOUNT>` or this repository's original
-`<SKILL>_<ACCOUNT>_<FIELD>`, which still resolves so no existing file breaks.
+```text
+.
+├── .github/
+│   ├── ISSUE_TEMPLATE/{bug-report.md,change-proposal.md}
+│   └── pull_request_template.md
+├── skills/
+│   └── <name>/
+│       ├── SKILL.md
+│       ├── rundesk.json
+│       ├── references/
+│       │   ├── cli.md
+│       │   └── <focused-reference>.md  optional
+│       └── scripts/
+│           ├── <name>
+│           └── <name>.d/        implementation and offline tests
+├── tests/test_catalog.py
+├── AGENTS.md
+├── CLAUDE.md
+├── ENVIRONMENTS.md
+├── RELEASING.md
+└── manifest.json
+```
 
-Read [ENVIRONMENTS.md](ENVIRONMENTS.md) for precedence, permissions, migration, cache/state,
-and the contract for building another integration. Maintainers use
-[RELEASING.md](RELEASING.md).
+Each package is an independent runtime, credential, profile, and removal boundary. Runtime files
+never depend on a sibling package or a root-local library.
 
-## Included skills
+## Development
 
-- `cloudflare` — zones, domains, registrar checks, and guarded DNS/domain changes.
-- `confluence` — spaces, trees, search, and page content.
-- `coolify` — servers, resources, deployments, logs, and guarded operational changes.
-- `discord` — servers, channels, threads, history, and guarded messages, replies, and reactions.
-- `grafana` — read-only Grafana Loki discovery, labels, bounded LogQL searches, filters, and error
-  investigation through Grafana's authenticated data-source proxy.
-- `jira` — projects, issues, comments, and attachment metadata.
-- `monarch` — Monarch Money accounts, net worth, transactions, budgets, cashflow, and holdings,
-  plus guarded edits to a transaction's category, merchant, notes, and tags, category creation,
-  transaction rules, and budget amounts. Every edit is a preview until an exact `--confirm`, is
-  capped in bulk, and is reversible through the package's own undo journal. No command can change an
-  amount, a date, or an account, split a transaction, or delete a transaction or a category.
-- `sentry` — projects, issue evidence, event inspection, and guarded resolution previews.
-- `slack-fetch` — accessible channel and DM discovery, bounded timestamped message history, search,
-  and complete thread reads through Slack's read-only Web API methods; it never reuses or extracts
-  a desktop or browser session.
-- `stripe` — balances, revenue, payouts, subscriptions, disputes, and reports. Read-only apart
-  from creating a report artifact.
+```sh
+python3 -m unittest discover -s tests -v
+python3 skills/cloudflare/scripts/cloudflare.d/test-cloudflare.py -q
+skills/cloudflare/scripts/cloudflare --help
+repository_root="$(pwd)"
+(cd /tmp && "$repository_root/skills/cloudflare/scripts/cloudflare" --help)
+git diff --check
+```
 
-## Rundesk Skills collection
+The root suite is the catalog gate and runs every package's offline suite. Tests use synthetic
+fixtures and never contact live services. Read [AGENTS.md](AGENTS.md) before contributing for
+approval, profile safety, privacy, validation, and documentation requirements.
 
-| Catalog | Purpose |
-|---|---|
-| [rundesk-skills](https://github.com/rundesk-ai/rundesk-skills) | General guidance and software-development workflows |
-| [rundesk-skills-gamedev](https://github.com/rundesk-ai/rundesk-skills-gamedev) | Game design, production, C++, 2D systems, and Axmol |
-| [rundesk-skills-apple](https://github.com/rundesk-ai/rundesk-skills-apple) | Guarded local Apple integrations for macOS |
-| [rundesk-skills-integrations](https://github.com/rundesk-ai/rundesk-skills-integrations) | Guarded service integration CLIs |
+## Creating a skill catalog
 
-Standalone layout details: [Codex skills](https://learn.chatgpt.com/docs/build-skills) and
-[Claude Code skills](https://code.claude.com/docs/en/slash-commands).
+Use the organization-wide [skill catalog guide](https://github.com/rundesk-ai/rundesk-cli/blob/main/docs/catalogs.md)
+for package structure, manifests, runtime isolation, credential declarations, public documentation,
+testing, and release contracts. Extend an existing package when it already owns the service API or
+command surface.
+
+## Contributing
+
+- Report reproducible incorrect behavior with the [bug report template](.github/ISSUE_TEMPLATE/bug-report.md).
+- Propose a skill, integration, command, or repository improvement with the [change proposal template](.github/ISSUE_TEMPLATE/change-proposal.md).
+- Prepare changes with the [pull request template](.github/pull_request_template.md) and provide
+  evidence for the exact head commit.
+
+Contributions must keep `README.md`, `manifest.json`, `skills/`, and catalog tests aligned and must
+contain no credentials, personal data, private identifiers, or owner-specific paths.
+
+## Releases
+
+Follow [RELEASING.md](RELEASING.md) for semantic versioning, tags, and publication. Changes to
+published catalog contents or runtime behavior require the version treatment it defines.
+Process-only guide or template changes, including `AGENTS.md`, `CLAUDE.md`, and GitHub templates, do
+not require a manifest version bump.
+
+## License
+
+This repository is licensed under the [MIT License](LICENSE).
