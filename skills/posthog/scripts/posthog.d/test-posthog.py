@@ -133,6 +133,36 @@ class PostHogCommandTests(unittest.TestCase):
             posthog.analytics_sql(SimpleNamespace(
                 mode="leads", event=[], after=None, before=None, days=7, limit=10,
             ))
+        self.assertIn("person.properties.email", posthog.analytics_sql(SimpleNamespace(
+            mode="leads", event=["lead"], after="2026-08-01", before="2026-08-02", days=7, limit=10,
+        )))
+        self.assertIn("person.properties.email", posthog.analytics_sql(SimpleNamespace(
+            mode="audiences", event=[], after="2026-08-01", before="2026-08-02", days=7, limit=10,
+        )))
+        with self.assertRaises(posthog.PostHogError):
+            posthog.analytics_sql(SimpleNamespace(
+                mode="traffic", event=["signup"], after="2026-08-01", before="2026-08-02", days=7, limit=10,
+            ))
+
+    def test_analytics_window_names_utc_and_normalizes_offsets(self):
+        args = SimpleNamespace(
+            mode="trends", event=[], after="2026-08-01T12:00:00+02:00",
+            before="2026-08-02T12:00:00+0200", days=7, limit=10,
+        )
+        window = posthog.analytics_window(args)
+        # The bound is converted to UTC and the timezone is named, because HogQL reads a bare
+        # toDateTime literal in the project's timezone.
+        self.assertIn("toDateTime('2026-08-01 10:00:00', 'UTC')", window)
+        self.assertIn("toDateTime('2026-08-02 10:00:00', 'UTC')", window)
+        self.assertNotIn("+02", window)
+
+    def test_unsupported_timestamp_is_refused_not_raised_as_valueerror(self):
+        # `fromisoformat` on the Python 3.9 floor rejects spellings the option pattern accepts.
+        with self.assertRaises(posthog.PostHogError):
+            posthog.timestamp_value("2026-08-01T12:00:00+99:99")
+        self.assertEqual(
+            "toDateTime('2026-08-01 00:00:00', 'UTC')", posthog.sql_timestamp("2026-08-01")
+        )
 
     def test_query_payload_has_hogql_kind_name_and_limit(self):
         captured = {}
@@ -148,6 +178,15 @@ class PostHogCommandTests(unittest.TestCase):
         self.assertEqual("HogQLQuery", captured["payload"]["query"]["kind"])
         self.assertIn("LIMIT 25", captured["payload"]["query"]["query"])
         self.assertEqual("trend check", captured["payload"]["name"])
+
+    def test_query_name_respects_posthog_bound(self):
+        args = SimpleNamespace(
+            command="query", profile="example", all_profiles=False, json=False,
+            sql="SELECT 1", name="x" * (posthog.MAX_QUERY_NAME + 1), limit=10,
+        )
+        with mock.patch.object(posthog, "get_profile", return_value=self.profile()):
+            with self.assertRaises(posthog.PostHogError):
+                posthog.run_command(args)
 
     def test_human_output_redacts_pii_and_url_queries(self):
         output = io.StringIO()

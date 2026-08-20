@@ -16,9 +16,18 @@ Common analytics presets are bounded, read-only HogQL queries:
 
 - `analytics trends` groups events and unique visitors by day.
 - `analytics traffic` groups pageviews by current URL and referring domain.
-- `analytics audiences` groups activity by distinct ID and includes a masked email field when available.
-- `analytics leads --event lead` groups lead events by email.
+- `analytics audiences` groups activity by distinct ID and includes a masked person email field,
+  falling back to the event email property when available.
+- `analytics leads --event lead` groups lead events by person email, falling back to the event email
+  property when available.
 - `analytics conversion --event signup --event purchase` returns event and unique-person counts for conversion-stage comparison.
+
+Analytics windows are UTC. `--days` counts back from the current UTC moment and a bare `--after`
+or `--before` date means UTC midnight; an offset-bearing timestamp is converted to UTC first. The
+generated HogQL names the timezone (`toDateTime('...', 'UTC')`) because an unqualified literal is
+parsed in the project's own timezone and would shift the window. `analytics traffic` always reads
+`$pageview`; passing `--event` is refused because that filter cannot be applied to the pageview
+preset.
 
 All commands accept `--profile <name>`, `--all-profiles`, and `--json` where applicable. A command
 refuses an ambiguous selection instead of combining credentials across profiles. Text output is
@@ -84,7 +93,7 @@ The direct events API is limited by PostHog and marked for future removal. It al
 recent window when `--after` is omitted and has a maximum date range. Use HogQL for durable event,
 trend, traffic, audience, lead, and conversion analysis. `query` accepts only one `SELECT` or
 `WITH` statement, refuses write/DDL keywords, adds `LIMIT` when absent, and refuses a supplied
-`LIMIT` larger than the command bound.
+`LIMIT` larger than the command bound, and limits `--name` to PostHog's 128-character API bound.
 
 ## Validation
 

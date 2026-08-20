@@ -4,14 +4,16 @@ Read one PostHog project's analytics, bounded and read-only.
 
 Usage:
   posthog profiles
-  posthog event-definitions [--search checkout] [--limit 25]
+  posthog event-definitions [--name signup] [--exclude-hidden] [--exclude-stale] [--limit 25]
   posthog events [--event '$pageview'] [--distinct-id ID] [--after 2026-08-01] [--before 2026-08-08] [--limit 25]
   posthog persons [--search text] [--email person@example.test] [--distinct-id ID] [--limit 25]
-  posthog recordings [--days 7] [--person-id UUID] [--limit 10]
-  posthog web [--days 7] [--limit 10]
-  posthog insights [--search text] [--limit 25]
+  posthog recordings [--offset 0] [--limit 10]
+  posthog web [--days 7] [--no-compare]
+  posthog insights [--search text] [--type TRENDS] [--date-from -7d] [--date-to -1d] [--limit 25]
   posthog insight SHORT_ID_OR_ID
   posthog query --sql "SELECT event, count() FROM events GROUP BY event" [--limit 100]
+  posthog analytics {trends|traffic|audiences|leads|conversion} [--event NAME] [--days 7]
+    [--after 2026-08-01] [--before 2026-08-08] [--limit 100]
 
 Inputs:
   Reads process env or an explicit/shared/isolated dotenv. A Rundesk-managed account appends
@@ -24,6 +26,9 @@ Outputs:
   Writes compact text to stdout, one `key=value | key=value` line per record. Raw JSON only with
   --json. Truncation, legacy-endpoint warnings, and refusals go to stderr. Every command is a
   read: this package has no verb that creates, edits, or deletes anything in PostHog.
+
+  Analytics windows are UTC. A bare date means UTC midnight and the generated HogQL names the
+  timezone explicitly, so the same window returns the same rows whatever the project's timezone.
 """
 
 from __future__ import annotations
@@ -52,6 +57,7 @@ KNOWN_REGIONS = ("https://us.posthog.com", "https://eu.posthog.com")
 MAX_PAGES = 5
 MAX_LIMIT = 1000
 MAX_DAYS = 365
+MAX_QUERY_NAME = 128
 REQUEST_TIMEOUT = 30
 
 EMAIL_PATTERN = re.compile(
@@ -676,12 +682,26 @@ def validate_timestamp(value: str | None, option: str) -> str | None:
 
 
 def timestamp_value(value: str) -> datetime.datetime:
-    normalized = value.replace("Z", "+00:00")
+    """One accepted `--after`/`--before` spelling as a UTC instant.
+
+    A bare date or a naive timestamp is read as UTC, so a window means the same thing whatever
+    the project's own timezone is. `fromisoformat` on the Python 3.9 floor rejects the compact
+    `+HHMM` offset the option pattern accepts, so widen it here rather than let a valid input
+    escape as a traceback.
+    """
+    normalized = value.strip().replace("Z", "+00:00")
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized):
         normalized += "T00:00:00+00:00"
     elif "T" not in normalized and " " in normalized:
         normalized = normalized.replace(" ", "T", 1)
-    parsed = datetime.datetime.fromisoformat(normalized)
+    normalized = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", normalized)
+    try:
+        parsed = datetime.datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise PostHogError(
+            f"Unsupported timestamp {value!r}. Use an ISO 8601 date or timestamp, such as "
+            "2026-08-01 or 2026-08-01T12:00:00Z."
+        ) from exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=datetime.timezone.utc)
     return parsed.astimezone(datetime.timezone.utc)
@@ -857,10 +877,15 @@ def sql_literal(value: str) -> str:
 
 
 def sql_timestamp(value: str) -> str:
-    value = value.strip()
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
-        value += " 00:00:00"
-    return sql_literal(value.replace("T", " ").replace("Z", ""))
+    """One window bound as an explicitly UTC HogQL expression.
+
+    HogQL reads an unqualified `toDateTime('...')` literal in the project's own timezone, so a
+    UTC clock reading pasted in bare shifts the window by that project's offset and quietly
+    answers a different question. An offset-bearing input also has to be converted rather than
+    concatenated, because ClickHouse cannot parse `'2026-08-01 12:00:00+02:00'` at all.
+    """
+    moment = timestamp_value(value)
+    return f"toDateTime({sql_literal(moment.strftime('%Y-%m-%d %H:%M:%S'))}, 'UTC')"
 
 
 def analytics_window(args: argparse.Namespace, include_event: bool = True) -> str:
@@ -868,9 +893,9 @@ def analytics_window(args: argparse.Namespace, include_event: bool = True) -> st
     after = after or days_ago(bounded(args.days, "--days", 1, MAX_DAYS))
     if before and timestamp_value(after) >= timestamp_value(before):
         raise PostHogError("--after must be earlier than --before.")
-    clauses = [f"timestamp >= toDateTime({sql_timestamp(after)})"]
+    clauses = [f"timestamp >= {sql_timestamp(after)}"]
     if before:
-        clauses.append(f"timestamp < toDateTime({sql_timestamp(before)})")
+        clauses.append(f"timestamp < {sql_timestamp(before)}")
     if include_event and args.event:
         values = ", ".join(sql_literal(event) for event in args.event)
         clauses.append(f"event IN ({values})")
@@ -886,6 +911,10 @@ def analytics_sql(args: argparse.Namespace) -> str:
             f"FROM events WHERE {window} GROUP BY day ORDER BY day LIMIT {limit}"
         )
     if args.mode == "traffic":
+        if args.event:
+            raise PostHogError(
+                "analytics traffic always reads $pageview; omit --event because it cannot be applied."
+            )
         window = analytics_window(args, include_event=False)
         return (
             "SELECT properties.$current_url AS url, properties.$referring_domain AS referring_domain, "
@@ -895,7 +924,8 @@ def analytics_sql(args: argparse.Namespace) -> str:
         )
     if args.mode == "audiences":
         return (
-            "SELECT distinct_id, any(properties.email) AS email, uniq(event) AS event_types, "
+            "SELECT distinct_id, any(coalesce(person.properties.email, properties.email)) AS email, "
+            "uniq(event) AS event_types, "
             "count() AS events "
             f"FROM events WHERE {window} GROUP BY distinct_id ORDER BY events DESC LIMIT {limit}"
         )
@@ -903,7 +933,8 @@ def analytics_sql(args: argparse.Namespace) -> str:
         if len(args.event) != 1:
             raise PostHogError("analytics leads requires exactly one --event, such as --event lead.")
         return (
-            "SELECT properties.email AS email, count() AS lead_events, uniq(distinct_id) AS leads "
+            "SELECT coalesce(person.properties.email, properties.email) AS email, "
+            "count() AS lead_events, uniq(distinct_id) AS leads "
             f"FROM events WHERE {window} GROUP BY email ORDER BY lead_events DESC LIMIT {limit}"
         )
     if args.mode == "conversion":
@@ -1038,6 +1069,10 @@ def run_command(args: argparse.Namespace) -> int:
         for profile in profiles:
             if args.command == "query":
                 sql = validate_hogql(args.sql)
+                if len(args.name) > MAX_QUERY_NAME:
+                    raise PostHogError(
+                        f"--name must be at most {MAX_QUERY_NAME} characters; got {len(args.name)}."
+                    )
                 data = run_hogql(profile, sql, bounded(args.limit, "--limit", 1, MAX_LIMIT), args.name)
             else:
                 sql = analytics_sql(args)
