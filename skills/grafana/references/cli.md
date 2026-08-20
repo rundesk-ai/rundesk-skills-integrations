@@ -14,8 +14,9 @@
 Every log read defaults to `--since 1h --limit 100 --direction backward`. `--since` accepts `s`,
 `m`, `h`, or `d`, is capped at 30 days, and may not be combined with `--start` or `--end`.
 Explicit bounds are RFC 3339 timestamps. Limits are capped at 1,000. A result equal to the requested
-limit warns that more lines may exist. Every log query must begin with a selector containing at
-least one exact non-empty label match; match-all and negative-only selectors are refused.
+limit warns that more lines may exist. Every log query must contain exactly one stream selector,
+begin with it, and include at least one exact non-empty label match; match-all, negative-only, and
+multi-selector expressions are refused. Pipelines after that selector remain available.
 
 Text output is compact and redacts common bearer tokens, authorization headers, passwords, API
 keys, access tokens, and secret assignments. `--json` returns the provider payload and is raw.
@@ -69,9 +70,9 @@ The command uses only read endpoints:
 - `GET /api/datasources/proxy/uid/<uid>/loki/api/v1/label/<name>/values`.
 - `GET /api/datasources/proxy/uid/<uid>/loki/api/v1/query_range`.
 
-It refuses non-HTTPS Grafana origins, embedded credentials, paths, cross-origin redirects, unknown
-API routes, selectors without an exact non-empty label match, non-Loki data-source UIDs, invalid
-labels, and API responses over 10 MiB.
+It refuses non-HTTPS Grafana origins, embedded credentials, paths, redirects outside the fixed
+read-only routes, unknown API routes, queries with multiple selectors or without an exact non-empty
+label match, non-Loki data-source UIDs, invalid labels, and API responses over 10 MiB.
 The raw LogQL command is intentionally available because parsing the full language locally would
 create a second, incomplete LogQL implementation; time and result bounds remain enforced around it.
 

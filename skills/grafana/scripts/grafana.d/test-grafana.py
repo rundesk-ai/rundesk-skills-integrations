@@ -64,12 +64,19 @@ class GrafanaCommand(unittest.TestCase):
         self.assertTrue(grafana.allowed_api_path("/api/datasources"))
         self.assertTrue(grafana.allowed_api_path(
             "/api/datasources/proxy/uid/logs/loki/api/v1/query_range"))
+        self.assertTrue(grafana.allowed_api_path(
+            "/api/datasources/proxy/uid/logs/loki/api/v1/label/service_name/values"))
         self.assertFalse(grafana.allowed_api_path("/api/dashboards"))
         self.assertFalse(grafana.allowed_api_path("/api/datasources-delete"))
+        self.assertFalse(grafana.allowed_api_path(
+            "/api/datasources/proxy/uid/logs/api/v1/admin"))
         handler = grafana.SameOriginRedirectHandler()
         request = SimpleNamespace(full_url="https://grafana.example.test/api/datasources")
         with self.assertRaises(grafana.GrafanaError):
             handler.redirect_request(request, None, 302, "", {}, "https://evil.example.test/")
+        with self.assertRaises(grafana.GrafanaError):
+            handler.redirect_request(request, None, 302, "", {},
+                                     "https://grafana.example.test/login")
 
     def test_datasource_discovery_keeps_only_loki_and_reports_truncation(self):
         payload = [
@@ -116,9 +123,15 @@ class GrafanaCommand(unittest.TestCase):
     def test_raw_queries_also_require_an_exact_nonempty_label_match(self):
         self.assertEqual('{service="api"}', grafana.selector_from_query(
             ' {service="api"} | json | status >= 500'))
+        self.assertEqual('{service="api"}', grafana.selector_from_query(
+            ' {service="api"} |= "literal { brace }" | line_format `{{.message}}`'))
         for query in ("{}", '{job=~".*"}', 'sum(rate({job="api"}[5m]))'):
             with self.subTest(query=query), self.assertRaises(grafana.GrafanaError):
                 grafana.require_bounded_selector(grafana.selector_from_query(query))
+        for query in ('{job="api"} or {job=~".*"}',
+                      '{job="api"} + on(instance) {job="other"}'):
+            with self.subTest(query=query), self.assertRaises(grafana.GrafanaError):
+                grafana.selector_from_query(query)
 
     def test_datasource_must_be_a_visible_loki_source(self):
         with unittest.mock.patch.object(grafana, "api_get", return_value=[
@@ -161,6 +174,25 @@ class GrafanaCommand(unittest.TestCase):
             grafana.flattened_streams({"result": [
                 {"stream": {}, "values": [["not-a-time", "broken"]]}
             ]})
+
+    def test_text_log_output_never_exceeds_the_requested_limit(self):
+        args = SimpleNamespace(datasource="loki-main", limit=2, since="1m", start=None, end=None,
+                               direction="backward", json=False)
+        data = {"resultType": "streams", "result": [
+            {"stream": {"job": "api"},
+             "values": [["3", "third"], ["2", "second"], ["1", "first"]]}
+        ]}
+        replies = [[{"uid": "loki-main", "type": "loki"}],
+                   {"status": "success", "data": data}]
+        with unittest.mock.patch.object(grafana, "api_get", side_effect=replies):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                grafana.print_logs(self.profile(), args, '{job="api"}')
+        self.assertIn("count=2", out.getvalue())
+        self.assertIn("third", out.getvalue())
+        self.assertIn("second", out.getvalue())
+        self.assertNotIn("first", out.getvalue())
+        self.assertIn("more log lines may exist", err.getvalue())
 
     def test_help_is_credential_free(self):
         with self.assertRaises(SystemExit) as ended:

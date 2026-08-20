@@ -22,8 +22,8 @@ and never guess a Loki UID when several are visible.
 Prefer structured selectors before text scanning. Begin with the narrowest known service,
 environment, namespace, container, or job label, then inspect at most one hour and 100 lines. Widen
 time, labels, or limits one dimension at a time and say when the command reports truncation.
-Every log query must retain at least one exact non-empty label match; discover labels and values
-first rather than using a match-all selector.
+Every log query must use exactly one stream selector with at least one exact non-empty label match;
+discover labels and values first rather than using a match-all or multi-selector expression.
 
 ```sh
 "$RUNDESK_SKILLS/grafana/scripts/grafana" logs --profile <profile> --datasource <uid> --selector '{service_name="api"}' --since 1h --contains timeout --limit 100

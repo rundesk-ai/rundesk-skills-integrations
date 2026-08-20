@@ -36,9 +36,9 @@ DURATION_RE = re.compile(r"([1-9][0-9]*)([smhd])")
 MAX_RANGE_SECONDS = 30 * 24 * 60 * 60
 MAX_LIMIT = 1000
 MAX_RESPONSE_BYTES = 10 * 1024 * 1024
-ALLOWED_PATHS = (
-    "/api/datasources",
-    "/api/datasources/proxy/uid/",
+LOKI_API_PATH_RE = re.compile(
+    r"/api/datasources/proxy/uid/[A-Za-z0-9._~-]+/loki/api/v1/"
+    r"(?:labels|label/[A-Za-z_][A-Za-z0-9_]*/values|query_range)"
 )
 ERROR_PATTERN = "(?i)(error|exception|fatal|panic|failed)"
 SECRET_PATTERNS = (
@@ -212,12 +212,14 @@ class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
         if (original.scheme, original.hostname, original.port) != (
                 target.scheme, target.hostname, target.port):
             raise GrafanaError("Grafana API refused an unexpected cross-origin redirect.")
+        if not allowed_api_path(target.path):
+            raise GrafanaError("Grafana API refused a redirect outside its read-only routes.")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def allowed_api_path(path: str) -> bool:
     """Whether a route belongs to this command's fixed read-only surface."""
-    return path == ALLOWED_PATHS[0] or path.startswith(ALLOWED_PATHS[1])
+    return path == "/api/datasources" or bool(LOKI_API_PATH_RE.fullmatch(path))
 
 
 def api_get(profile: Profile, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -351,6 +353,23 @@ def selector_from_query(query: str) -> str:
     match = re.match(r"\s*(\{[^{}\r\n]{0,1000}\})", query)
     if not match:
         raise GrafanaError("LogQL query must begin with a bounded stream selector.")
+    quote = ""
+    escaped = False
+    for char in query[match.end():]:
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+        elif quote:
+            if char == quote:
+                quote = ""
+        elif char in ('"', "`"):
+            quote = char
+        elif char in "{}":
+            raise GrafanaError("Raw LogQL must contain exactly one stream selector.")
     return match.group(1)
 
 
@@ -491,8 +510,9 @@ def print_logs(profile: Profile, args: argparse.Namespace, query: str) -> None:
         "query": query, "start": start, "end": end, "limit": limit,
         "direction": args.direction,
     })
-    rows = flattened_streams(data)
-    if len(rows) >= limit:
+    all_rows = flattened_streams(data)
+    rows = all_rows[:limit]
+    if len(all_rows) >= limit:
         print(f"WARNING: Grafana Loki returned --limit {limit}; more log lines may exist.",
               file=sys.stderr)
     if args.json:
