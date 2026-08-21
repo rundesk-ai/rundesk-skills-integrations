@@ -16,6 +16,10 @@ declarations, and offline tests. Every skill is an independently installable run
   transaction's category, merchant, notes, and tags; category creation; transaction-rule creation
   and deletion; budget setting; and undo. It cannot change a transaction's amount, date, or account,
   delete a transaction or category, or split a transaction.
+- `posthog` - bounded product analytics reads for projects, event definitions, events, persons,
+  session recording metadata, web analytics, saved insights, HogQL queries, and trend, traffic,
+  audience, lead, and conversion presets. It has no capture, configuration, key-management, or
+  mutation commands.
 - `sentry` - projects, issue evidence, event inspection, and guarded resolution previews.
 - `slack-fetch` - read-only channel and direct-message discovery, bounded message history, search,
   and complete thread reads through Slack's Web API.
