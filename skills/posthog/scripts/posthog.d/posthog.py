@@ -59,6 +59,7 @@ MAX_LIMIT = 1000
 MAX_DAYS = 365
 MAX_QUERY_NAME = 128
 REQUEST_TIMEOUT = 30
+MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 
 EMAIL_PATTERN = re.compile(
     r"(?<![\w.+-])([A-Z0-9._%+-]+)@([A-Z0-9.-]+\.[A-Z]{2,})(?![\w.-])",
@@ -300,10 +301,9 @@ def url_origin(value: str) -> tuple[str, str, int | None]:
 
 class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if redirected is not None and url_origin(req.full_url) != url_origin(newurl):
-            redirected.remove_header("Authorization")
-        return redirected
+        if url_origin(req.full_url) != url_origin(newurl):
+            raise PostHogError("PostHog API refused an unexpected cross-origin redirect.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def open_url(req: urllib.request.Request, timeout: int):
@@ -452,7 +452,13 @@ def request_url(
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
             with open_url(req, timeout=REQUEST_TIMEOUT) as response:
-                raw = response.read().decode("utf-8", errors="replace")
+                body_bytes = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(body_bytes) > MAX_RESPONSE_BYTES:
+                    raise PostHogError(
+                        f"PostHog response exceeded {MAX_RESPONSE_BYTES} bytes "
+                        f"profile={profile.name}. Narrow the read."
+                    )
+                raw = body_bytes.decode("utf-8", errors="replace")
                 try:
                     data = json.loads(raw) if raw else None
                 except json.JSONDecodeError as exc:
@@ -462,7 +468,9 @@ def request_url(
                     ) from exc
                 return data, dict(response.headers)
         except urllib.error.HTTPError as exc:
-            raw = exc.read().decode("utf-8", errors="replace")
+            raw = exc.read(MAX_RESPONSE_BYTES + 1)[:MAX_RESPONSE_BYTES].decode(
+                "utf-8", errors="replace"
+            )
             # PostHog rate-limits personal API keys per key and per endpoint family; only a
             # read is safe to repeat.
             if method in ("GET", "POST") and exc.code == 429 and attempt < retries:
@@ -629,11 +637,31 @@ def validate_hogql(sql: str) -> str:
     return statement.rstrip().rstrip(";").rstrip()
 
 
+def top_level_limit(sql: str) -> tuple[int, bool] | None:
+    """Return a statement-level LIMIT and whether it is the per-group `LIMIT n BY` form."""
+    skeleton = sql_skeleton(sql)
+    depth = 0
+    tokens = re.finditer(r"\(|\)|\bLIMIT\s+(\d+)\b", skeleton, re.IGNORECASE)
+    for token in tokens:
+        if token.group(0) == "(":
+            depth += 1
+        elif token.group(0) == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            tail = skeleton[token.end():]
+            return int(token.group(1)), bool(re.match(r"\s+BY\b", tail, re.IGNORECASE))
+    return None
+
+
 def ensure_limit(sql: str, limit: int) -> str:
-    """Append a bound or reject an explicit limit that exceeds the command bound."""
-    match = re.search(r"\bLIMIT\s+(\d+)\b", sql_skeleton(sql), re.IGNORECASE)
-    if match:
-        requested = int(match.group(1))
+    """Append a statement bound or reject one that is larger or only per-group."""
+    explicit = top_level_limit(sql)
+    if explicit:
+        requested, per_group = explicit
+        if per_group:
+            raise PostHogError(
+                "Refusing --sql: LIMIT n BY is a per-group limit, not a total result bound."
+            )
         if requested > limit:
             raise PostHogError(
                 f"Refusing --sql: its LIMIT {requested} exceeds the command limit {limit}."
@@ -642,7 +670,9 @@ def ensure_limit(sql: str, limit: int) -> str:
     return f"{sql} LIMIT {limit}"
 
 
-def run_hogql(profile: Profile, sql: str, limit: int, name: str) -> dict[str, Any]:
+def run_hogql(
+    profile: Profile, sql: str, limit: int, name: str
+) -> tuple[dict[str, Any], bool]:
     payload = {
         "query": {"kind": "HogQLQuery", "query": ensure_limit(sql, limit)},
         "name": name,
@@ -650,11 +680,14 @@ def run_hogql(profile: Profile, sql: str, limit: int, name: str) -> dict[str, An
     data, _ = request(profile, "POST", project_path(profile, "query/"), payload=payload)
     if not isinstance(data, dict):
         raise PostHogError("Unexpected PostHog query response: expected an object.")
-    if not isinstance(data.get("results"), list):
+    results = data.get("results")
+    if not isinstance(results, list):
         raise PostHogError(
             "Unexpected PostHog query response: no `results` list in the payload."
         )
-    return data
+    bounded_data = dict(data)
+    bounded_data["results"] = results[:limit]
+    return bounded_data, len(results) > limit
 
 
 def query_rows(data: dict[str, Any]) -> tuple[list[str], list[list[Any]]]:
@@ -962,6 +995,7 @@ def add_limit(command: argparse.ArgumentParser, default: int = 25) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read bounded PostHog project analytics.")
+    parser.add_argument("--env-file", help="explicit dotenv path")
     sub = parser.add_subparsers(dest="command", required=True)
 
     profiles = sub.add_parser("profiles", help="list configured profiles without network access")
@@ -1055,14 +1089,19 @@ def run_command(args: argparse.Namespace) -> int:
             if args.json:
                 emit_json({"profile": profile.name, "data": data})
             else:
-                print(line([(key, output_value(key, value)) for key, value in data.items()]))
+                print(line([
+                    ("profile", profile.name),
+                    *[(key, output_value(key, value)) for key, value in data.items()],
+                ]))
         return 0
     if args.command == "insight":
         for profile in profiles:
             data, _ = request(profile, "GET", project_path(profile, f"insights/{urllib.parse.quote(args.insight_id, safe='')}"))
+            if not isinstance(data, dict):
+                raise PostHogError("Unexpected PostHog insight response: expected an object.")
             if args.json:
                 emit_json({"profile": profile.name, "data": data})
-            elif isinstance(data, dict):
+            else:
                 emit_records([data], tuple(data.keys()), profile.name)
         return 0
     if args.command in {"query", "analytics"}:
@@ -1073,11 +1112,14 @@ def run_command(args: argparse.Namespace) -> int:
                     raise PostHogError(
                         f"--name must be at most {MAX_QUERY_NAME} characters; got {len(args.name)}."
                     )
-                data = run_hogql(profile, sql, bounded(args.limit, "--limit", 1, MAX_LIMIT), args.name)
+                limit = bounded(args.limit, "--limit", 1, MAX_LIMIT)
+                data, more = run_hogql(profile, sql, limit, args.name)
             else:
                 sql = analytics_sql(args)
-                data = run_hogql(profile, sql, bounded(args.limit, "--limit", 1, MAX_LIMIT), f"rundesk analytics {args.mode}")
+                limit = bounded(args.limit, "--limit", 1, MAX_LIMIT)
+                data, more = run_hogql(profile, sql, limit, f"rundesk analytics {args.mode}")
             emit_query(data, profile.name, args.json)
+            report_truncation(more, len(data["results"]), limit)
         return 0
 
     limit = bounded(args.limit, "--limit", 1, MAX_LIMIT)
@@ -1110,10 +1152,11 @@ def run_command(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    load_dotenv(resolve_env_file())
     parser = build_parser()
+    args = parser.parse_args(argv)
+    load_dotenv(resolve_env_file(args.env_file))
     try:
-        return run_command(parser.parse_args(argv))
+        return run_command(args)
     except PostHogError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

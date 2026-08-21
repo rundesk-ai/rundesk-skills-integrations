@@ -29,7 +29,8 @@ parsed in the project's own timezone and would shift the window. `analytics traf
 `$pageview`; passing `--event` is refused because that filter cannot be applied to the pageview
 preset.
 
-All commands accept `--profile <name>`, `--all-profiles`, and `--json` where applicable. A command
+Pass `--env-file <path>` before the command name for an explicit owner-only dotenv. All resource
+commands accept `--profile <name>`, `--all-profiles`, and `--json` where applicable. A command
 refuses an ambiguous selection instead of combining credentials across profiles. Text output is
 compact and masks email addresses, redacts IP addresses, strips URL query strings, and truncates
 long values. JSON is explicit and may contain PostHog's raw person or event fields; do not paste it
@@ -85,9 +86,9 @@ distinct ID, person ID, ISO date/timestamp `--after` and `--before`, selected fi
 insight type, and date bounds. Session recordings are filtered by the documented offset and limit.
 
 PostHog paginates resource responses with a `next` URL. The CLI follows only same-origin HTTPS
-URLs, stops at the requested limit or a bounded page cap, and reports remaining data. It retries
-429 responses for reads using `Retry-After` when present. A 403 normally indicates that the key is
-missing the resource scope or cannot access the configured project.
+URLs, stops at the requested limit or a bounded page cap, caps each response at 10 MiB, and reports
+remaining data. It retries 429 responses for reads using `Retry-After` when present. A 403 normally
+indicates that the key is missing the resource scope or cannot access the configured project.
 
 The direct events API is limited by PostHog and marked for future removal. It also defaults to a
 recent window when `--after` is omitted and has a maximum date range. Use HogQL for durable event,

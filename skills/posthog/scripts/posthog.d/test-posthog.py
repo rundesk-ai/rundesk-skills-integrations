@@ -5,6 +5,7 @@ import io
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,8 +73,16 @@ class PostHogCommandTests(unittest.TestCase):
 
     def test_hogql_guard_and_limit(self):
         self.assertEqual("SELECT * FROM events LIMIT 10", posthog.ensure_limit("SELECT * FROM events", 10))
+        self.assertEqual(
+            "WITH sample AS (SELECT * FROM events LIMIT 1) SELECT * FROM events LIMIT 10",
+            posthog.ensure_limit(
+                "WITH sample AS (SELECT * FROM events LIMIT 1) SELECT * FROM events", 10
+            ),
+        )
         with self.assertRaises(posthog.PostHogError):
             posthog.ensure_limit("SELECT * FROM events LIMIT 11", 10)
+        with self.assertRaises(posthog.PostHogError):
+            posthog.ensure_limit("SELECT * FROM events LIMIT 2 BY event", 10)
         self.assertEqual("SELECT 'delete'", posthog.validate_hogql("SELECT 'delete';"))
         for sql in ("DELETE FROM events", "SELECT 1; SELECT 2", "DROP TABLE events", ""):
             with self.subTest(sql=sql):
@@ -102,6 +111,33 @@ class PostHogCommandTests(unittest.TestCase):
         with mock.patch.object(posthog, "request", return_value=(first, {})):
             with self.assertRaises(posthog.PostHogError):
                 posthog.paginate(self.profile(), "projects/", {}, 2)
+
+    def test_transport_refuses_cross_origin_redirects_and_oversized_responses(self):
+        handler = posthog.SameOriginRedirectHandler()
+        request = SimpleNamespace(full_url="https://us.posthog.com/api/projects/12345/events/")
+        with self.assertRaises(posthog.PostHogError):
+            handler.redirect_request(
+                request, None, 302, "", {}, "https://evil.example.test/capture"
+            )
+
+        class OversizedResponse:
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, size):
+                return b"x" * size
+
+        with mock.patch.object(posthog, "MAX_RESPONSE_BYTES", 8):
+            with mock.patch.object(posthog, "open_url", return_value=OversizedResponse()):
+                with self.assertRaises(posthog.PostHogError):
+                    posthog.request_url(
+                        self.profile(), "GET", "https://us.posthog.com/api/projects/12345/events/"
+                    )
 
     def test_event_filters_are_forwarded(self):
         args = SimpleNamespace(
@@ -172,12 +208,26 @@ class PostHogCommandTests(unittest.TestCase):
             return ({"columns": ["count"], "results": [[3]]}, {})
 
         with mock.patch.object(posthog, "request", side_effect=fake_request):
-            result = posthog.run_hogql(self.profile(), "SELECT count() FROM events", 25, "trend check")
+            result, more = posthog.run_hogql(
+                self.profile(), "SELECT count() FROM events", 25, "trend check"
+            )
         self.assertEqual([[3]], result["results"])
+        self.assertFalse(more)
         self.assertEqual("POST", captured["method"])
         self.assertEqual("HogQLQuery", captured["payload"]["query"]["kind"])
         self.assertIn("LIMIT 25", captured["payload"]["query"]["query"])
         self.assertEqual("trend check", captured["payload"]["name"])
+
+        with mock.patch.object(
+            posthog,
+            "request",
+            return_value=({"columns": ["count"], "results": [[1], [2], [3]]}, {}),
+        ):
+            bounded_result, more = posthog.run_hogql(
+                self.profile(), "SELECT count() FROM events", 2, "bounded check"
+            )
+        self.assertEqual([[1], [2]], bounded_result["results"])
+        self.assertTrue(more)
 
     def test_query_name_respects_posthog_bound(self):
         args = SimpleNamespace(
@@ -209,6 +259,45 @@ class PostHogCommandTests(unittest.TestCase):
         profile_result = subprocess.run([str(launcher), "profiles"], env=env, text=True, capture_output=True)
         self.assertEqual(0, profile_result.returncode, profile_result.stderr)
         self.assertIn("No PostHog profiles", profile_result.stdout)
+
+    def test_explicit_env_file_is_loaded_after_credential_free_parsing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            env_file = Path(temporary) / "posthog.env"
+            env_file.write_text(
+                "POSTHOG_PERSONAL_API_KEY=synthetic-key\nPOSTHOG_PROJECT_ID=12345\n",
+                encoding="utf-8",
+            )
+            env_file.chmod(0o600)
+            output = io.StringIO()
+            with mock.patch.dict(os.environ, {}, clear=True):
+                with mock.patch("sys.stdout", output):
+                    self.assertEqual(
+                        0,
+                        posthog.main(["--env-file", str(env_file), "profiles", "--json"]),
+                    )
+            self.assertIn('"profile": "default"', output.getvalue())
+
+    def test_web_text_names_profile(self):
+        web_args = SimpleNamespace(
+            command="web", profile="example", all_profiles=False, json=False,
+            days=7, compare=True,
+        )
+        output = io.StringIO()
+        with mock.patch.object(posthog, "get_profile", return_value=self.profile()):
+            with mock.patch.object(posthog, "web_analytics", return_value={"visitors": 3}):
+                with mock.patch("sys.stdout", output):
+                    self.assertEqual(0, posthog.run_command(web_args))
+        self.assertIn("profile=example", output.getvalue())
+
+    def test_malformed_insight_is_refused(self):
+        insight_args = SimpleNamespace(
+            command="insight", profile="example", all_profiles=False, json=False,
+            insight_id="abc",
+        )
+        with mock.patch.object(posthog, "get_profile", return_value=self.profile()):
+            with mock.patch.object(posthog, "request", return_value=([], {})):
+                with self.assertRaises(posthog.PostHogError):
+                    posthog.run_command(insight_args)
 
 
 if __name__ == "__main__":
