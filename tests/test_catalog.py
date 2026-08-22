@@ -55,16 +55,17 @@ ISSUE_TEMPLATE_CONTRACTS = {
         ("name: Bug report", "about: Report reproducible incorrect behavior",
          'title: "[Bug] "', 'labels: ""', 'assignees: ""'),
         ("## Problem", "## Reproduction", "## Expected behavior", "## Evidence",
-         "## Environment", "## Scope and privacy"),
-        "747da5c0682a73adc61c35407327fb174c648630e80278c275af4a4542da6caf",
+         "## Acceptance criteria", "## Environment", "## Scope and privacy"),
+        "9b8bb222a68b4c2a592512ee368c17bc8edc8e0750c5f76ba3e4dd65837e5187",
     ),
     "change-proposal.md": (
         ("name: Change proposal",
          "about: Propose a skill, integration, command, or repository improvement",
          'title: "[Proposal] "', 'labels: ""', 'assignees: ""'),
-        ("## Problem", "## Desired outcome", "## Users and value",
-         "## Scope and compatibility", "## Alternatives", "## Validation"),
-        "2fe6a1d651ce91af2c3d19e98eea150ca26f41ad9a1ed95a6466a692b73eb4d7",
+        ("## Problem", "## Proposed solution", "## Evidence",
+         "## Scope and compatibility", "## Acceptance criteria", "## Verification",
+         "## Alternatives considered"),
+        "71f68d702f29e1cedd6b5a839b8a10df899240f68bd215d734ee77f5286cd379",
     ),
 }
 AGENT_GUIDE_ANCHORS = {
