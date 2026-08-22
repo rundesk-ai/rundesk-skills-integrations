@@ -1,6 +1,6 @@
 ---
 name: confluence
-description: Reading Confluence Cloud spaces, page lists, page trees, search results, and page detail, plus guarded edits to existing pages.
+description: Use when an agent needs Confluence Cloud space, page-list, tree, search, or page-detail reads, or guarded edits to existing pages with version confirmation.
 category: providers
 ---
 
