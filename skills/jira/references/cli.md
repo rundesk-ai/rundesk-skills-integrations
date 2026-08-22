@@ -1,6 +1,6 @@
 ---
 name: jira
-description: Reading Jira Cloud projects, issues, comments, and attachment metadata, plus guarded issue creation, editing, and one-file uploads.
+description: Reading Jira Cloud projects, issues, comments, and attachment metadata, plus guarded issue creation, editing, commenting, deletion, and one-file uploads.
 category: providers
 ---
 
@@ -28,6 +28,10 @@ category: providers
 - View issue comments in detail: `jira detail APP-252 --profile example`
 - Dry-run one-file upload: `jira upload APP-252 --profile example --file /tmp/example.txt`
 - Confirm one-file upload: `jira upload APP-252 --profile example --file /tmp/example.txt --confirm`
+- Dry-run comment: `jira comment APP-252 --profile example --body "Progress update"`
+- Confirm comment: `jira comment APP-252 --profile example --body "Progress update" --confirm`
+- Dry-run issue deletion: `jira delete APP-252 --profile example`
+- Confirm issue deletion: `jira delete APP-252 --profile example --confirm`
 - Resolve issue keys from text: `jira identify 'Review APP-252' --all-profiles`
 
 Default output is compact text for agent context. `list` and `search` print CSV-style rows. Use `--json` only for debugging, exports, or consumers that need raw plus normalized Jira fields.
@@ -44,7 +48,7 @@ Default output is compact text for agent context. `list` and `search` print CSV-
   - `jira detail APP-252 --profile example --full --json`
   - `jira attachments APP-252 --profile example`
 
-Do not run `create --confirm`, `edit --confirm`, `upload --confirm`, or `attachment --output --confirm` as a smoke test
+Do not run `create --confirm`, `edit --confirm`, `upload --confirm`, `comment --confirm`, `delete --confirm`, or `attachment --output --confirm` as a smoke test
 unless the owner confirms the exact profile and target/effect. Offline tests cover the write request
 method, ADF description conversion, project allowlisting, multipart file upload, dry-runs, and confirmation paths.
 
@@ -78,6 +82,11 @@ scope documented by Atlassian.
 For uploads, the account also needs Browse Projects and Create attachments for the issue's project.
 The command sends one explicit local file as multipart form data and uses Jira's required
 `X-Atlassian-Token: no-check` header. It never uploads a directory or recursively discovers files.
+
+For comments, the account needs Browse projects and Add comments for the issue's project. For issue
+deletion, it needs Browse projects and Delete issues. Jira refuses deletion when the issue has
+subtasks unless a separate delete-subtasks option is supplied; this integration never supplies that
+option.
 
 ### Setup
 
@@ -167,8 +176,10 @@ Attachment bytes are never downloaded by `detail` or `attachments`; those comman
 - Create and edit are guarded mutations: they print a dry-run and require `--confirm`.
 - Create is bounded to the configured project allowlist and does not infer an issue type.
 - Upload is bounded to one explicit regular file and the configured project allowlist.
-- Comments remain read-only and viewable through `comments` and `detail`.
-- The integration does not transition, comment on, or delete Jira issues.
+- Comment creation and issue deletion are guarded mutations, each requiring `--confirm`.
+- Comments remain viewable through `comments` and `detail`.
+- Delete targets one issue and never requests deletion of subtasks.
+- The integration does not transition issues, perform bulk operations, or administer projects/sites.
 
 ### Official References
 

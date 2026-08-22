@@ -15,6 +15,8 @@ Usage:
   jira create --project APP --issue-type Task --summary "Example task" [--description TEXT] [--profile example] [--confirm]
   jira edit APP-123 [--summary TEXT] [--description TEXT] [--clear-description] [--profile example] [--confirm]
   jira upload APP-123 --file /path/to/file [--profile example] [--confirm]
+  jira comment APP-123 --body TEXT [--profile example] [--confirm]
+  jira delete APP-123 [--profile example] [--confirm]
   jira identify "Fix APP-123" [--all-profiles]
 
 Inputs:
@@ -1222,6 +1224,95 @@ def command_upload(args: argparse.Namespace, profile: Profile) -> int:
     return 0
 
 
+def command_comment(args: argparse.Namespace, profile: Profile) -> int:
+    if not ISSUE_KEY_RE.fullmatch(args.issue_key):
+        raise JiraError(f"Invalid Jira issue key: {args.issue_key}")
+    require_project_for_write(profile, args.issue_key.split("-", 1)[0])
+    if not args.body.strip():
+        raise JiraError("Comment body must not be empty.")
+
+    body = {"body": text_to_adf(args.body)}
+    if not args.confirm:
+        print(
+            "DRY-RUN Jira comment add | "
+            + " | ".join(
+                [
+                    f"profile={profile.name}",
+                    f"issue={args.issue_key}",
+                    f"body={json.dumps(args.body, ensure_ascii=False)}",
+                    "confirm=pass --confirm to add the comment",
+                ]
+            )
+        )
+        return 0
+
+    response = request(
+        profile,
+        f"rest/api/3/issue/{urllib.parse.quote(args.issue_key)}/comment",
+        method="POST",
+        body=body,
+        retries=0,
+    )
+    if not isinstance(response, dict) or not response.get("id"):
+        raise JiraError(f"Jira comment add returned an unexpected response: {response}")
+
+    result = {"issue_key": args.issue_key, "comment_id": response["id"], "profile": profile.name}
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(
+            "Jira comment added | "
+            + " | ".join(
+                [
+                    f"profile={profile.name}",
+                    f"issue={args.issue_key}",
+                    f"comment_id={response['id']}",
+                ]
+            )
+        )
+    return 0
+
+
+def command_delete(args: argparse.Namespace, profile: Profile) -> int:
+    if not ISSUE_KEY_RE.fullmatch(args.issue_key):
+        raise JiraError(f"Invalid Jira issue key: {args.issue_key}")
+    require_project_for_write(profile, args.issue_key.split("-", 1)[0])
+
+    if not args.confirm:
+        print(
+            "DRY-RUN Jira issue delete | "
+            + " | ".join(
+                [
+                    f"profile={profile.name}",
+                    f"issue={args.issue_key}",
+                    "confirm=pass --confirm to permanently delete the issue",
+                ]
+            )
+        )
+        return 0
+
+    request(
+        profile,
+        f"rest/api/3/issue/{urllib.parse.quote(args.issue_key)}",
+        method="DELETE",
+        retries=0,
+    )
+    result = {"issue_key": args.issue_key, "profile": profile.name, "deleted": True}
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(
+            "Jira issue deleted | "
+            + " | ".join(
+                [
+                    f"profile={profile.name}",
+                    f"issue={args.issue_key}",
+                ]
+            )
+        )
+    return 0
+
+
 def publish_bytes_exclusive(output: Path, content: bytes) -> None:
     if output.is_symlink() or output.exists():
         raise JiraError(f"Refusing to overwrite existing output path: {output}")
@@ -1322,6 +1413,8 @@ def build_parser() -> argparse.ArgumentParser:
               jira create --profile example --project APP --issue-type Task --summary "Example task" --confirm
               jira edit APP-252 --profile example --summary "Updated title" --confirm
               jira upload APP-252 --profile example --file /tmp/example.png --confirm
+              jira comment APP-252 --profile example --body "Progress update" --confirm
+              jira delete APP-252 --profile example --confirm
               jira identify "Fix APP-252" --all-profiles
             """
         ),
@@ -1419,6 +1512,21 @@ def build_parser() -> argparse.ArgumentParser:
     upload.add_argument("--confirm", action="store_true", help="Upload the file after reviewing the dry-run output.")
     upload.add_argument("--json", action="store_true", help="Print uploaded attachment metadata as JSON.")
     upload.set_defaults(handler=command_upload)
+
+    comment = subparsers.add_parser("comment", help="Add one Jira comment. Dry-run unless --confirm is passed.")
+    add_common_options(comment, suppress_defaults=True)
+    comment.add_argument("issue_key")
+    comment.add_argument("--body", required=True, help="Plain-text comment body.")
+    comment.add_argument("--confirm", action="store_true", help="Add the comment after reviewing the dry-run output.")
+    comment.add_argument("--json", action="store_true", help="Print the added comment reference as JSON.")
+    comment.set_defaults(handler=command_comment)
+
+    delete = subparsers.add_parser("delete", help="Delete one Jira issue. Dry-run unless --confirm is passed.")
+    add_common_options(delete, suppress_defaults=True)
+    delete.add_argument("issue_key")
+    delete.add_argument("--confirm", action="store_true", help="Delete the issue after reviewing the dry-run output.")
+    delete.add_argument("--json", action="store_true", help="Print the deleted issue reference as JSON.")
+    delete.set_defaults(handler=command_delete)
 
     identify = subparsers.add_parser("identify", help="Find Jira issue keys in text and resolve them to profiles.")
     add_common_options(identify, suppress_defaults=True)

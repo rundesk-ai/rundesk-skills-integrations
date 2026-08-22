@@ -513,6 +513,80 @@ class JiraModuleTest(unittest.TestCase):
 
         self.assertIn("outside configured project allowlist", str(error.exception))
 
+    def test_comment_is_dry_run_without_confirm(self) -> None:
+        args = SimpleNamespace(
+            issue_key="APP-252",
+            body="Progress update",
+            confirm=False,
+            json=False,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=AssertionError("live comment")), redirect_stdout(output):
+            self.module.command_comment(args, self.profile)
+
+        self.assertIn("DRY-RUN Jira comment add", output.getvalue())
+        self.assertIn("Progress update", output.getvalue())
+
+    def test_comment_posts_adf_body(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, **kwargs):
+            captured.update({"profile": profile.name, "path": path, **kwargs})
+            return {"id": "20001"}
+
+        args = SimpleNamespace(
+            issue_key="APP-252",
+            body="Progress update",
+            confirm=True,
+            json=True,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_comment(args, self.profile)
+
+        self.assertEqual(captured["path"], "rest/api/3/issue/APP-252/comment")
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["retries"], 0)
+        self.assertEqual(
+            captured["body"],
+            {"body": self.module.text_to_adf("Progress update")},
+        )
+        self.assertEqual(json.loads(output.getvalue())["comment_id"], "20001")
+
+    def test_delete_is_dry_run_without_confirm(self) -> None:
+        args = SimpleNamespace(
+            issue_key="APP-252",
+            confirm=False,
+            json=False,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=AssertionError("live delete")), redirect_stdout(output):
+            self.module.command_delete(args, self.profile)
+
+        self.assertIn("DRY-RUN Jira issue delete", output.getvalue())
+        self.assertIn("permanently delete", output.getvalue())
+
+    def test_delete_uses_exact_issue_key_and_confirmation(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, **kwargs):
+            captured.update({"profile": profile.name, "path": path, **kwargs})
+            return None
+
+        args = SimpleNamespace(
+            issue_key="APP-252",
+            confirm=True,
+            json=True,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_delete(args, self.profile)
+
+        self.assertEqual(captured["path"], "rest/api/3/issue/APP-252")
+        self.assertEqual(captured["method"], "DELETE")
+        self.assertEqual(captured["retries"], 0)
+        self.assertEqual(json.loads(output.getvalue())["deleted"], True)
+
     def test_list_output_is_csv_style_rows_with_module_detail_path(self) -> None:
         issue = self.issue(
             "APP-252",
