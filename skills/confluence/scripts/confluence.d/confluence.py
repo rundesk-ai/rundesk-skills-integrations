@@ -10,6 +10,7 @@ Usage:
   confluence tree --space DOCS --root EXAMPLE_PAGE_ID [--profile example]
   confluence search [--profile example] [--space DOCS] [--query "source quality"]
   confluence page PAGE_ID [--profile example] [--full] [--json]
+  confluence edit PAGE_ID [--profile example] [--title "New title"] [--body-file page.xhtml]
 
 Inputs:
   Reads process env or an explicit/shared/isolated dotenv. Rundesk-managed accounts use
@@ -22,7 +23,7 @@ Inputs:
 
 Outputs:
   Writes compact text summaries to stdout. No raw JSON unless --json is provided.
-  The integration is read-only and does not mutate Confluence.
+  Page edits are dry-runs unless --confirm and the expected current version are provided.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+import hashlib
 import html
 import json
 import os
@@ -434,6 +436,8 @@ def request(
     path: str,
     params: dict[str, Any] | None = None,
     retries: int = 2,
+    method: str = "GET",
+    body: dict[str, Any] | None = None,
 ) -> Any:
     url = validate_base_url(profile.base_url) + "/" + path.lstrip("/")
     if params:
@@ -444,9 +448,13 @@ def request(
         "Accept": "application/json",
         "User-Agent": "workspace-confluence/1.0",
     }
+    payload = None
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        payload = json.dumps(body).encode("utf-8")
 
     for attempt in range(retries + 1):
-        req = urllib.request.Request(url, headers=headers, method="GET")
+        req = urllib.request.Request(url, data=payload, headers=headers, method=method)
         try:
             with open_url(req, timeout=30) as response:
                 raw = response.read().decode("utf-8", errors="replace")
@@ -869,6 +877,151 @@ def command_page(args: argparse.Namespace, profile: Profile) -> int:
     return 0
 
 
+def validate_page_id(page_id: str) -> str:
+    if not re.fullmatch(r"[0-9]+", page_id or ""):
+        raise ConfluenceError("Page id must be a numeric Confluence page id.")
+    return page_id
+
+
+def read_body_file(path_value: str) -> str:
+    path = Path(path_value).expanduser()
+    try:
+        if not path.is_file():
+            raise ConfluenceError(f"Body file is not a regular file: {path}")
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfluenceError(f"Cannot read body file {path}: {exc}") from exc
+
+
+def page_storage_body(page: dict[str, Any]) -> str:
+    body = page.get("body") if isinstance(page.get("body"), dict) else {}
+    storage = body.get("storage") if isinstance(body.get("storage"), dict) else {}
+    value = storage.get("value")
+    if not isinstance(value, str):
+        raise ConfluenceError("Confluence page did not return storage-format body content to preserve.")
+    return value
+
+
+def page_version_number(page: dict[str, Any]) -> int:
+    raw_version = item_version(page)
+    try:
+        version = int(raw_version)
+    except (TypeError, ValueError) as exc:
+        raise ConfluenceError("Confluence page did not return a numeric current version.") from exc
+    if version < 1:
+        raise ConfluenceError("Confluence page returned an invalid current version.")
+    return version
+
+
+def body_summary(value: str) -> dict[str, Any]:
+    encoded = value.encode("utf-8")
+    return {
+        "body_chars": len(value),
+        "body_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def command_edit(args: argparse.Namespace, profile: Profile) -> int:
+    page_id = validate_page_id(args.page_id)
+    if args.body is not None and args.body_file:
+        raise ConfluenceError("Pass either --body or --body-file, not both.")
+    if args.title is None and args.body is None and not args.body_file:
+        raise ConfluenceError("Edit requires --title, --body, or --body-file.")
+    if args.title is not None and not args.title.strip():
+        raise ConfluenceError("Page title cannot be empty.")
+
+    page_path = f"wiki/rest/api/content/{urllib.parse.quote(page_id)}"
+    page = request(profile, page_path, params={"expand": "body.storage,version,space"})
+    if not isinstance(page, dict):
+        raise ConfluenceError("Confluence returned an invalid page response.")
+
+    space_key = item_space_key(page)
+    if not profile.spaces:
+        raise ConfluenceError(
+            "Confluence edits require a configured space allowlist. Add CONFLUENCE_SPACES__<PROFILE>."
+        )
+    if space_key not in profile.spaces:
+        raise ConfluenceError(
+            f"Refusing to edit page {page_id}: space {space_key} is outside the profile allowlist "
+            f"({', '.join(profile.spaces)})."
+        )
+
+    current_version = page_version_number(page)
+    title = args.title if args.title is not None else text(page.get("title"), "")
+    if args.body is not None:
+        body = args.body
+    elif args.body_file:
+        body = read_body_file(args.body_file)
+    else:
+        body = page_storage_body(page)
+    summary = body_summary(body)
+
+    if not args.confirm:
+        payload = {
+            "operation": "edit",
+            "dry_run": True,
+            "page_id": page_id,
+            "profile": profile.name,
+            "space": space_key,
+            "current_version": current_version,
+            "next_version": current_version + 1,
+            "title": title,
+            **summary,
+            "expected_version": args.expected_version,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print("DRY RUN: Confluence page edit")
+            print(f"profile={profile.name} | page={page_id} | space={space_key}")
+            print(f"current_version={current_version} | next_version={current_version + 1}")
+            print(f"title={title!r}")
+            print(f"body_chars={summary['body_chars']} | body_sha256={summary['body_sha256']}")
+            print(
+                f"To execute this exact edit, rerun with --confirm --expected-version {current_version}."
+            )
+        return 0
+
+    if args.expected_version is None:
+        raise ConfluenceError(
+            f"Confirmed edits require --expected-version {current_version} from the dry-run preview."
+        )
+    if args.expected_version != current_version:
+        raise ConfluenceError(
+            f"Refusing edit: expected page version {args.expected_version}, but current version is {current_version}. "
+            "Run a new dry-run to review the newer page before confirming."
+        )
+
+    update_body: dict[str, Any] = {
+        "id": page_id,
+        "status": text(page.get("status"), "current"),
+        "title": title,
+        "body": {"representation": "storage", "value": body},
+        "version": {"number": current_version + 1},
+    }
+    if args.message:
+        update_body["version"]["message"] = args.message
+
+    result = request(
+        profile,
+        f"wiki/api/v2/pages/{urllib.parse.quote(page_id)}",
+        method="PUT",
+        body=update_body,
+        retries=0,
+    )
+    if not isinstance(result, dict) or text(result.get("id"), "") != page_id:
+        raise ConfluenceError("Confluence returned an invalid page update response.")
+
+    if args.json:
+        print(json.dumps({"updated": result, "body_summary": summary}, indent=2, sort_keys=True))
+    else:
+        print(
+            f"Confluence page updated | profile={profile.name} | page={page_id} | space={space_key} "
+            f"| version={item_version(result) or current_version + 1}"
+        )
+    return 0
+
+
 def add_common_options(parser: argparse.ArgumentParser, suppress_defaults: bool = False) -> None:
     default = argparse.SUPPRESS if suppress_defaults else None
     parser.add_argument(
@@ -888,7 +1041,7 @@ def add_common_options(parser: argparse.ArgumentParser, suppress_defaults: bool 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Pull compact Confluence page context for workspace triage.",
+        description="Inspect Confluence pages and edit one page with explicit version confirmation.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent(
             """\
@@ -899,6 +1052,8 @@ def build_parser() -> argparse.ArgumentParser:
               confluence tree --profile example --space DOCS --depth 3
               confluence search --profile example --space DOCS --query "source quality"
               confluence page EXAMPLE_PAGE_ID --profile example --full
+              confluence edit EXAMPLE_PAGE_ID --profile example --title "Updated title"
+              confluence edit EXAMPLE_PAGE_ID --profile example --body-file page.xhtml --confirm --expected-version 3
             """
         ),
     )
@@ -948,6 +1103,28 @@ def build_parser() -> argparse.ArgumentParser:
     page.add_argument("--body-limit", type=int, default=4000, help="Maximum body text characters in text output.")
     page.add_argument("--json", action="store_true", help="Print raw JSON.")
     page.set_defaults(handler=command_page)
+
+    edit = subparsers.add_parser("edit", help="Edit one Confluence page. Dry-run unless --confirm is passed.")
+    add_common_options(edit, suppress_defaults=True)
+    edit.add_argument("page_id")
+    edit.add_argument("--title", help="Replacement page title; omitted means preserve the current title.")
+    edit.add_argument(
+        "--body",
+        help="Replacement Confluence storage XHTML; omitted means preserve the current body.",
+    )
+    edit.add_argument(
+        "--body-file",
+        help="Read replacement Confluence storage XHTML from one explicit local file.",
+    )
+    edit.add_argument("--message", help="Optional message recorded on the new Confluence page version.")
+    edit.add_argument(
+        "--expected-version",
+        type=int,
+        help="Current page version from the dry-run; required with --confirm to prevent stale overwrites.",
+    )
+    edit.add_argument("--confirm", action="store_true", help="Perform the reviewed page update.")
+    edit.add_argument("--json", action="store_true", help="Print structured output.")
+    edit.set_defaults(handler=command_edit)
 
     return parser
 

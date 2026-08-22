@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "rundesk-skills-integrations",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Guarded service integrations for Cloudflare, Atlassian, Coolify, Discord, Grafana, Monarch Money, PostHog analytics, Sentry, Slack fetching, and Stripe.",
   "skills": [
     {"name": "cloudflare", "path": "skills/cloudflare"},

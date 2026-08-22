@@ -392,6 +392,110 @@ class ConfluenceModuleTest(unittest.TestCase):
         self.assertEqual(payload["comments"], [{"id": "comment-1"}])
         self.assertIn("Hello world", payload["normalized"]["body_text"])
 
+    def test_edit_dry_run_previews_page_version_and_does_not_update(self) -> None:
+        calls = []
+
+        def fake_request(profile, path, params=None, retries=2, method="GET", body=None):
+            calls.append((path, params, retries, method, body))
+            self.assertEqual(method, "GET")
+            return self.v1_page("123", "DOCS", body="<p>Current body</p>")
+
+        args = SimpleNamespace(
+            page_id="123",
+            title="Updated title",
+            body=None,
+            body_file=None,
+            message=None,
+            expected_version=None,
+            confirm=False,
+            json=True,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_edit(args, self.profile)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["page_id"], "123")
+        self.assertEqual(payload["current_version"], 3)
+        self.assertEqual(payload["next_version"], 4)
+        self.assertEqual(payload["title"], "Updated title")
+        self.assertEqual(len(calls), 1)
+
+    def test_edit_confirm_updates_storage_body_with_next_version(self) -> None:
+        calls = []
+
+        def fake_request(profile, path, params=None, retries=2, method="GET", body=None):
+            calls.append((path, params, retries, method, body))
+            if method == "GET":
+                return self.v1_page("123", "DOCS", body="<p>Current body</p>")
+            return {"id": "123", "version": {"number": 4}}
+
+        args = SimpleNamespace(
+            page_id="123",
+            title="Updated title",
+            body="<p>Updated body</p>",
+            body_file=None,
+            message="Agent update",
+            expected_version=3,
+            confirm=True,
+            json=False,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_edit(args, self.profile)
+
+        self.assertEqual(len(calls), 2)
+        update_path, params, retries, method, body = calls[1]
+        self.assertEqual(update_path, "wiki/api/v2/pages/123")
+        self.assertIsNone(params)
+        self.assertEqual(retries, 0)
+        self.assertEqual(method, "PUT")
+        self.assertEqual(body["id"], "123")
+        self.assertEqual(body["status"], "current")
+        self.assertEqual(body["title"], "Updated title")
+        self.assertEqual(body["body"], {"representation": "storage", "value": "<p>Updated body</p>"})
+        self.assertEqual(body["version"], {"number": 4, "message": "Agent update"})
+        self.assertIn("version=4", output.getvalue())
+
+    def test_edit_refuses_stale_expected_version_before_update(self) -> None:
+        calls = []
+
+        def fake_request(profile, path, params=None, retries=2, method="GET", body=None):
+            calls.append(method)
+            return self.v1_page("123", "DOCS", body="<p>Current body</p>")
+
+        args = SimpleNamespace(
+            page_id="123",
+            title=None,
+            body="<p>Updated body</p>",
+            body_file=None,
+            message=None,
+            expected_version=2,
+            confirm=True,
+            json=False,
+        )
+        with patch.object(self.module, "request", side_effect=fake_request):
+            with self.assertRaisesRegex(self.module.ConfluenceError, "expected page version 2"):
+                self.module.command_edit(args, self.profile)
+
+        self.assertEqual(calls, ["GET"])
+
+    def test_edit_requires_a_configured_space_allowlist(self) -> None:
+        profile = self.module.Profile("example", self.profile.base_url, self.profile.email, self.profile.token, [], "Example Docs")
+        args = SimpleNamespace(
+            page_id="123",
+            title="Updated title",
+            body=None,
+            body_file=None,
+            message=None,
+            expected_version=None,
+            confirm=False,
+            json=False,
+        )
+        with patch.object(self.module, "request", return_value=self.v1_page("123", "DOCS", body="<p>Body</p>")):
+            with self.assertRaisesRegex(self.module.ConfluenceError, "space allowlist"):
+                self.module.command_edit(args, profile)
+
     def test_fetch_paginated_uses_cursor_from_next_link(self) -> None:
         responses = [
             {"results": [{"id": "1"}], "_links": {"next": "/wiki/api/v2/spaces/10/pages?cursor=abc&limit=50"}},
