@@ -11,7 +11,7 @@ declarations, and offline tests. Every skill is an independently installable run
 - `discord` - servers, channels, threads, history, and guarded messages, replies, and reactions.
 - `grafana` - read-only Grafana Loki discovery, labels, bounded LogQL searches, filters, and error
   investigation through Grafana's authenticated data-source proxy.
-- `jira` - projects, issues, comments, and attachment metadata.
+- `jira` - projects, issues, viewable comments, attachment metadata/downloads, and guarded issue creation, editing, commenting, deletion, and one-file uploads.
 - `monarch` - financial accounts, transactions, budgets, cash flow, and holdings; guarded edits to a
   transaction's category, merchant, notes, and tags; category creation; transaction-rule creation
   and deletion; budget setting; and undo. It cannot change a transaction's amount, date, or account,

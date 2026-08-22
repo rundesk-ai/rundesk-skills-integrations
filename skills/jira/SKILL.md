@@ -1,6 +1,6 @@
 ---
 name: jira
-description: Use when the user needs facts from an existing Jira Cloud issue, project, backlog, comment, or attachment, including when they provide only an issue or project key. It supplies account-scoped searches and issue detail. Do not use to plan work generally or to create, edit, transition, or comment on Jira issues.
+description: Use when the user asks to inspect Jira Cloud projects, issues, comments, or attachments, or to create, edit, comment on, attach a file to, or delete an issue. It supplies account-scoped Jira reads and guarded issue mutations with explicit confirmation. Do not use it for Jira transitions, bulk operations, or project and site administration.
 ---
 
 # Jira
@@ -24,8 +24,17 @@ Use compact output by default:
 "$RUNDESK_SKILLS/jira/scripts/jira" detail <KEY-123> --profile <profile> --full
 "$RUNDESK_SKILLS/jira/scripts/jira" comments <KEY-123> --profile <profile>
 "$RUNDESK_SKILLS/jira/scripts/jira" attachments <KEY-123> --profile <profile>
+"$RUNDESK_SKILLS/jira/scripts/jira" create --profile <profile> --project <key> --issue-type <name> --summary '<text>'
+"$RUNDESK_SKILLS/jira/scripts/jira" edit <KEY-123> --profile <profile> --summary '<text>'
+"$RUNDESK_SKILLS/jira/scripts/jira" upload <KEY-123> --profile <profile> --file /path/to/file
+"$RUNDESK_SKILLS/jira/scripts/jira" comment <KEY-123> --profile <profile> --body '<text>'
+"$RUNDESK_SKILLS/jira/scripts/jira" delete <KEY-123> --profile <profile>
 ```
 
 Keep JQL bounded to one project. Use `--json` only when raw structured data is required.
-Jira is read-only. An attachment download writes only to an explicit new local path and
-requires the owner's approval for that attachment and path before `--confirm`.
+All mutations are dry-runs by default. Review the exact project, issue key, fields, comment body,
+file, or delete target, then pass `--confirm` to perform the live operation. Create, edit, comment,
+upload, and delete require the issue's project key to be in the profile's configured `JIRA_PROJECTS`
+allowlist. Delete targets one issue and does not request deletion of subtasks. Comments remain
+viewable through `comments` and `detail`; attachment metadata remains viewable through `attachments`.
+The integration does not transition issues, perform bulk operations, or administer projects or sites.

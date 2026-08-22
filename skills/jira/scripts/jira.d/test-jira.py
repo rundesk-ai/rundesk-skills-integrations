@@ -252,6 +252,341 @@ class JiraModuleTest(unittest.TestCase):
         self.assertEqual(captured["jql"], "project = APP ORDER BY updated DESC")
         self.assertEqual(captured["maxResults"], 5)
 
+    def test_request_sends_json_body_with_requested_method(self) -> None:
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"key":"APP-253"}'
+
+        def fake_open_url(request, timeout):
+            captured["method"] = request.method
+            captured["data"] = request.data
+            captured["content_type"] = request.get_header("Content-type")
+            captured["timeout"] = timeout
+            return Response()
+
+        with patch.object(self.module, "open_url", side_effect=fake_open_url):
+            response = self.module.request(
+                self.profile,
+                "rest/api/3/issue",
+                method="POST",
+                body={"fields": {"summary": "Created"}},
+                retries=0,
+            )
+
+        self.assertEqual(response, {"key": "APP-253"})
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(json.loads(captured["data"]), {"fields": {"summary": "Created"}})
+        self.assertEqual(captured["content_type"], "application/json")
+        self.assertEqual(captured["timeout"], 30)
+
+    def test_request_sends_raw_body_and_extra_headers(self) -> None:
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b"[]"
+
+        def fake_open_url(request, timeout):
+            captured["method"] = request.method
+            captured["data"] = request.data
+            captured["content_type"] = request.get_header("Content-type")
+            captured["token_header"] = request.get_header("X-atlassian-token")
+            return Response()
+
+        with patch.object(self.module, "open_url", side_effect=fake_open_url):
+            response = self.module.request(
+                self.profile,
+                "rest/api/3/issue/APP-252/attachments",
+                method="POST",
+                raw_body=b"multipart",
+                extra_headers={
+                    "Content-Type": "multipart/form-data; boundary=test",
+                    "X-Atlassian-Token": "no-check",
+                },
+                retries=0,
+            )
+
+        self.assertEqual(response, [])
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["data"], b"multipart")
+        self.assertEqual(captured["content_type"], "multipart/form-data; boundary=test")
+        self.assertEqual(captured["token_header"], "no-check")
+
+    def test_text_to_adf_preserves_lines(self) -> None:
+        self.assertEqual(
+            self.module.text_to_adf("First line\n\nThird line"),
+            {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                    {"type": "paragraph", "content": [{"type": "text", "text": "First line"}]},
+                    {"type": "paragraph"},
+                    {"type": "paragraph", "content": [{"type": "text", "text": "Third line"}]},
+                ],
+            },
+        )
+
+    def test_create_is_dry_run_without_confirm(self) -> None:
+        args = SimpleNamespace(
+            project="APP",
+            issue_type="Task",
+            summary="Create this",
+            description="Details",
+            confirm=False,
+            json=False,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=AssertionError("live write")), redirect_stdout(output):
+            self.module.command_create(args, self.profile)
+
+        self.assertIn("DRY-RUN Jira issue create", output.getvalue())
+        self.assertIn('"summary": "Create this"', output.getvalue())
+
+    def test_create_posts_only_to_an_allowed_project(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, **kwargs):
+            captured.update({"profile": profile.name, "path": path, **kwargs})
+            return {"id": "10001", "key": "APP-253"}
+
+        args = SimpleNamespace(
+            project="APP",
+            issue_type="Task",
+            summary="Create this",
+            description="Details",
+            confirm=True,
+            json=True,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_create(args, self.profile)
+
+        self.assertEqual(captured["path"], "rest/api/3/issue")
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["retries"], 0)
+        self.assertEqual(captured["body"]["fields"]["project"], {"key": "APP"})
+        self.assertEqual(json.loads(output.getvalue())["issue_key"], "APP-253")
+
+    def test_create_refuses_a_project_outside_the_allowlist(self) -> None:
+        args = SimpleNamespace(
+            project="OTHER",
+            issue_type="Task",
+            summary="Create this",
+            description=None,
+            confirm=True,
+            json=False,
+        )
+        with patch.object(self.module, "request", side_effect=AssertionError("live write")):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.command_create(args, self.profile)
+
+        self.assertIn("outside configured project allowlist", str(error.exception))
+
+    def test_edit_is_dry_run_without_confirm(self) -> None:
+        args = SimpleNamespace(
+            issue_key="APP-252",
+            summary="Updated title",
+            description=None,
+            clear_description=False,
+            confirm=False,
+            json=False,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=AssertionError("live write")), redirect_stdout(output):
+            self.module.command_edit(args, self.profile)
+
+        self.assertIn("DRY-RUN Jira issue edit", output.getvalue())
+        self.assertIn('"summary": "Updated title"', output.getvalue())
+
+    def test_edit_puts_only_requested_fields(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, **kwargs):
+            captured.update({"profile": profile.name, "path": path, **kwargs})
+            return None
+
+        args = SimpleNamespace(
+            issue_key="APP-252",
+            summary=None,
+            description=None,
+            clear_description=True,
+            confirm=True,
+            json=True,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_edit(args, self.profile)
+
+        self.assertEqual(captured["path"], "rest/api/3/issue/APP-252")
+        self.assertEqual(captured["method"], "PUT")
+        self.assertEqual(captured["retries"], 0)
+        self.assertEqual(captured["body"], {"fields": {"description": None}})
+        self.assertEqual(json.loads(output.getvalue())["edited_fields"], ["description"])
+
+    def test_edit_requires_a_field(self) -> None:
+        args = SimpleNamespace(
+            issue_key="APP-252",
+            summary=None,
+            description=None,
+            clear_description=False,
+            confirm=False,
+            json=False,
+        )
+        with self.assertRaises(self.module.JiraError) as error:
+            self.module.command_edit(args, self.profile)
+
+        self.assertIn("Pass --summary", str(error.exception))
+
+    def test_upload_is_dry_run_without_confirm(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = Path(temp_dir) / "example.txt"
+            file_path.write_bytes(b"example")
+            args = SimpleNamespace(
+                issue_key="APP-252",
+                file=str(file_path),
+                confirm=False,
+                json=False,
+            )
+            output = io.StringIO()
+            with patch.object(self.module, "request", side_effect=AssertionError("live upload")), redirect_stdout(output):
+                self.module.command_upload(args, self.profile)
+
+        self.assertIn("DRY-RUN Jira attachment upload", output.getvalue())
+        self.assertIn("bytes=7", output.getvalue())
+
+    def test_upload_posts_one_multipart_file(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, **kwargs):
+            captured.update({"profile": profile.name, "path": path, **kwargs})
+            return [{"id": "10001", "filename": "example.txt", "size": 7}]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = Path(temp_dir) / "example.txt"
+            file_path.write_bytes(b"example")
+            args = SimpleNamespace(
+                issue_key="APP-252",
+                file=str(file_path),
+                confirm=True,
+                json=True,
+            )
+            output = io.StringIO()
+            with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+                self.module.command_upload(args, self.profile)
+
+        self.assertEqual(captured["path"], "rest/api/3/issue/APP-252/attachments")
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["retries"], 0)
+        self.assertEqual(captured["extra_headers"]["X-Atlassian-Token"], "no-check")
+        self.assertIn("multipart/form-data; boundary=", captured["extra_headers"]["Content-Type"])
+        self.assertIn(b'name="file"; filename="example.txt"', captured["raw_body"])
+        self.assertIn(b"example", captured["raw_body"])
+        self.assertEqual(json.loads(output.getvalue())["attachments"][0]["id"], "10001")
+
+    def test_upload_refuses_a_project_outside_the_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = Path(temp_dir) / "example.txt"
+            file_path.write_bytes(b"example")
+            args = SimpleNamespace(
+                issue_key="OTHER-252",
+                file=str(file_path),
+                confirm=True,
+                json=False,
+            )
+            with patch.object(self.module, "request", side_effect=AssertionError("live upload")):
+                with self.assertRaises(self.module.JiraError) as error:
+                    self.module.command_upload(args, self.profile)
+
+        self.assertIn("outside configured project allowlist", str(error.exception))
+
+    def test_comment_is_dry_run_without_confirm(self) -> None:
+        args = SimpleNamespace(
+            issue_key="APP-252",
+            body="Progress update",
+            confirm=False,
+            json=False,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=AssertionError("live comment")), redirect_stdout(output):
+            self.module.command_comment(args, self.profile)
+
+        self.assertIn("DRY-RUN Jira comment add", output.getvalue())
+        self.assertIn("Progress update", output.getvalue())
+
+    def test_comment_posts_adf_body(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, **kwargs):
+            captured.update({"profile": profile.name, "path": path, **kwargs})
+            return {"id": "20001"}
+
+        args = SimpleNamespace(
+            issue_key="APP-252",
+            body="Progress update",
+            confirm=True,
+            json=True,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_comment(args, self.profile)
+
+        self.assertEqual(captured["path"], "rest/api/3/issue/APP-252/comment")
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["retries"], 0)
+        self.assertEqual(
+            captured["body"],
+            {"body": self.module.text_to_adf("Progress update")},
+        )
+        self.assertEqual(json.loads(output.getvalue())["comment_id"], "20001")
+
+    def test_delete_is_dry_run_without_confirm(self) -> None:
+        args = SimpleNamespace(
+            issue_key="APP-252",
+            confirm=False,
+            json=False,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=AssertionError("live delete")), redirect_stdout(output):
+            self.module.command_delete(args, self.profile)
+
+        self.assertIn("DRY-RUN Jira issue delete", output.getvalue())
+        self.assertIn("permanently delete", output.getvalue())
+
+    def test_delete_uses_exact_issue_key_and_confirmation(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, **kwargs):
+            captured.update({"profile": profile.name, "path": path, **kwargs})
+            return None
+
+        args = SimpleNamespace(
+            issue_key="APP-252",
+            confirm=True,
+            json=True,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_delete(args, self.profile)
+
+        self.assertEqual(captured["path"], "rest/api/3/issue/APP-252")
+        self.assertEqual(captured["method"], "DELETE")
+        self.assertEqual(captured["retries"], 0)
+        self.assertEqual(json.loads(output.getvalue())["deleted"], True)
+
     def test_list_output_is_csv_style_rows_with_module_detail_path(self) -> None:
         issue = self.issue(
             "APP-252",
