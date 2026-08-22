@@ -6,14 +6,22 @@ Usage:
   jira profiles
   jira whoami [--profile example]
   jira projects [--profile example]
+  jira boards --project APP [--profile example]
+  jira sprints --board-id 42 [--state active|future] [--profile example]
+  jira backlog --board-id 42 [--profile example]
+  jira sprint --sprint-id 7 [--profile example]
+  jira epics --board-id 42 [--profile example]
+  jira epic --epic APP-10 [--profile example]
   jira list [--profile example] [--project APP] [--limit 25]
   jira search --jql 'project = APP ORDER BY updated DESC' [--profile example]
   jira detail APP-123 [--profile example] [--full] [--json]
   jira comments APP-123 [--profile example] [--json]
   jira attachments APP-123 [--profile example] [--json]
   jira attachment --id EXAMPLE_ATTACHMENT_ID --output /tmp/example.png [--profile example] [--confirm]
-  jira create --project APP --issue-type Task --summary "Example task" [--description TEXT] [--profile example] [--confirm]
-  jira edit APP-123 [--summary TEXT] [--description TEXT] [--clear-description] [--profile example] [--confirm]
+  jira create --project APP --issue-type Task --summary "Example task" [--description TEXT] [--epic APP-10] [--profile example] [--confirm]
+  jira edit APP-123 [--summary TEXT] [--description TEXT] [--clear-description] [--epic APP-10] [--profile example] [--confirm]
+  jira assign-epic APP-123 --epic APP-10 [--profile example] [--confirm]
+  jira assign-sprint APP-123 --sprint-id 7 [--profile example] [--confirm]
   jira upload APP-123 --file /path/to/file [--profile example] [--confirm]
   jira comment APP-123 --body TEXT [--profile example] [--confirm]
   jira delete APP-123 [--profile example] [--confirm]
@@ -53,7 +61,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_FIELDS = "summary,status,assignee,updated,project,issuetype,priority,creator,reporter"
+DEFAULT_FIELDS = "summary,status,assignee,updated,project,issuetype,priority,creator,reporter,parent"
 
 
 def default_env_candidates() -> list[Path]:
@@ -81,7 +89,19 @@ def resolve_env_file(explicit: str | None = None) -> Path:
 DEFAULT_ENV = resolve_env_file()
 DETAIL_FIELDS = DEFAULT_FIELDS + ",description,attachment,labels,components,fixVersions"
 ISSUE_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
-ISSUE_LIST_COLUMNS = ["key", "title", "type", "status", "priority", "assignee", "updated", "project", "profile"]
+ISSUE_LIST_COLUMNS = [
+    "key",
+    "title",
+    "type",
+    "status",
+    "priority",
+    "assignee",
+    "updated",
+    "project",
+    "epic",
+    "sprint",
+    "profile",
+]
 
 
 class JiraError(RuntimeError):
@@ -544,6 +564,80 @@ def list_field_names(items: Any) -> str:
     return ", ".join(name for name in names if name != "-") or "-"
 
 
+def issue_reference(value: Any) -> dict[str, str] | None:
+    if isinstance(value, str):
+        return {"key": value, "id": "", "name": ""}
+    if not isinstance(value, dict):
+        return None
+
+    nested_fields = value.get("fields") if isinstance(value.get("fields"), dict) else {}
+    key = text(value.get("key") or nested_fields.get("key"), "")
+    name = text(
+        value.get("name")
+        or value.get("summary")
+        or nested_fields.get("name")
+        or nested_fields.get("summary"),
+        "",
+    )
+    identifier = text(value.get("id"), "")
+    if not key and not name and not identifier:
+        return None
+    return {"key": key, "id": identifier, "name": name}
+
+
+def named_field_value(issue: dict[str, Any], labels: set[str]) -> Any:
+    fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else {}
+    names = issue.get("names") if isinstance(issue.get("names"), dict) else {}
+    for field_id, field_name_value in names.items():
+        if str(field_name_value).strip().lower() in labels and field_id in fields:
+            return fields[field_id]
+    return None
+
+
+def epic_reference(issue: dict[str, Any]) -> dict[str, str] | None:
+    fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else {}
+    for candidate in (fields.get("epic"), fields.get("parent")):
+        reference = issue_reference(candidate)
+        if reference:
+            return reference
+
+    return issue_reference(named_field_value(issue, {"epic link", "epic"}))
+
+
+def sprint_references(issue: dict[str, Any]) -> list[dict[str, str]]:
+    fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else {}
+    value = fields.get("sprint")
+    if value is None:
+        value = named_field_value(issue, {"sprint"})
+    values = value if isinstance(value, list) else [value]
+    references = []
+    for item in values:
+        reference = issue_reference(item)
+        if reference:
+            state = text(item.get("state"), "") if isinstance(item, dict) else ""
+            reference["state"] = state
+            references.append(reference)
+    return references
+
+
+def reference_label(reference: dict[str, str] | None) -> str:
+    if not reference:
+        return "-"
+    key = reference.get("key") or reference.get("id") or "-"
+    name = reference.get("name")
+    return f"{key} ({name})" if name else key
+
+
+def sprint_label(issue: dict[str, Any]) -> str:
+    references = sprint_references(issue)
+    labels = []
+    for reference in references:
+        label = reference_label(reference)
+        state = reference.get("state")
+        labels.append(f"{label} [{state}]" if state else label)
+    return ", ".join(labels) or "-"
+
+
 def issue_url(profile: Profile, key: str) -> str:
     return f"{profile.base_url}/browse/{key}"
 
@@ -563,6 +657,8 @@ def issue_line(issue: dict[str, Any], profile: Profile) -> str:
         f"status={text(status.get('name'))}",
         f"priority={text(priority.get('name'))}",
         f"assignee={user_label(fields.get('assignee'))}",
+        f"epic={reference_label(epic_reference(issue))}",
+        f"sprint={sprint_label(issue)}",
         f"updated={compact_datetime(fields.get('updated'))}",
     ]
 
@@ -589,6 +685,8 @@ def issue_list_row(issue: dict[str, Any], profile: Profile) -> list[str]:
         user_label(fields.get("assignee")),
         compact_datetime(fields.get("updated")),
         text(project.get("key")),
+        reference_label(epic_reference(issue)),
+        sprint_label(issue),
         profile.name,
     ]
 
@@ -680,6 +778,8 @@ def normalized_issue(issue: dict[str, Any], profile: Profile, comments: list[Any
         "labels": fields.get("labels") or [],
         "components": [field_item_name(item) for item in fields.get("components") or []],
         "fixVersions": [field_item_name(item) for item in fields.get("fixVersions") or []],
+        "epic": epic_reference(issue),
+        "sprints": sprint_references(issue),
         "attachments": [normalized_attachment(attachment) for attachment in attachments],
         "comments": [normalized_comment(comment) for comment in comments or []],
     }
@@ -802,6 +902,245 @@ def command_projects(args: argparse.Namespace, profile: Profile) -> int:
     return 0
 
 
+def validate_numeric_id(value: str, label: str) -> str:
+    if not re.fullmatch(r"[0-9]+", value or ""):
+        raise JiraError(f"{label} must be a numeric Jira id.")
+    return value
+
+
+def print_agile_issues(
+    title: str,
+    issues: list[dict[str, Any]],
+    profile: Profile,
+    args: argparse.Namespace,
+    context: dict[str, Any] | None = None,
+) -> int:
+    if args.json:
+        payload: dict[str, Any] = {
+            "issues": issues,
+            "normalized": [normalized_issue(issue, profile) for issue in issues],
+        }
+        payload.update(context or {})
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"{title} | profile={profile.name} count={len(issues)}")
+    print_issue_list(issues, profile)
+    return 0
+
+
+def command_boards(args: argparse.Namespace, profile: Profile) -> int:
+    params: dict[str, Any] = {"maxResults": min(args.limit, 100)}
+    if args.project:
+        params["projectKeyOrId"] = args.project
+    boards = fetch_paginated(
+        profile,
+        "rest/agile/1.0/board",
+        "values",
+        params=params,
+        max_items=args.limit,
+    )
+    if args.json:
+        print(json.dumps({"boards": boards}, indent=2, sort_keys=True))
+        return 0
+    print(f"Jira boards | profile={profile.name} count={len(boards)}")
+    for board in boards:
+        print(
+            "- "
+            + " | ".join(
+                [
+                    f"id={text(board.get('id'))}",
+                    f"name={text(board.get('name'))}",
+                    f"type={text(board.get('type'))}",
+                ]
+            )
+        )
+    return 0
+
+
+def command_sprints(args: argparse.Namespace, profile: Profile) -> int:
+    board_id = validate_numeric_id(args.board_id, "Board id")
+    params: dict[str, Any] = {"maxResults": min(args.limit, 100)}
+    if args.state:
+        params["state"] = ",".join(args.state)
+    sprints = fetch_paginated(
+        profile,
+        f"rest/agile/1.0/board/{board_id}/sprint",
+        "values",
+        params=params,
+        max_items=args.limit,
+    )
+    if args.json:
+        print(json.dumps({"board_id": board_id, "sprints": sprints}, indent=2, sort_keys=True))
+        return 0
+    print(f"Jira sprints | profile={profile.name} board={board_id} count={len(sprints)}")
+    for sprint in sprints:
+        print(
+            "- "
+            + " | ".join(
+                [
+                    f"id={text(sprint.get('id'))}",
+                    f"name={text(sprint.get('name'))}",
+                    f"state={text(sprint.get('state'))}",
+                    f"start={text(sprint.get('startDate'))}",
+                    f"end={text(sprint.get('endDate'))}",
+                ]
+            )
+        )
+    return 0
+
+
+def command_backlog(args: argparse.Namespace, profile: Profile) -> int:
+    board_id = validate_numeric_id(args.board_id, "Board id")
+    issues = fetch_paginated(
+        profile,
+        f"rest/agile/1.0/board/{board_id}/backlog",
+        "issues",
+        params={"maxResults": min(args.limit, 100)},
+        max_items=args.limit,
+    )
+    return print_agile_issues(
+        f"Jira backlog | board={board_id}",
+        issues,
+        profile,
+        args,
+        context={"view": "backlog", "board_id": int(board_id)},
+    )
+
+
+def command_sprint_issues(args: argparse.Namespace, profile: Profile) -> int:
+    sprint_id = validate_numeric_id(args.sprint_id, "Sprint id")
+    issues = fetch_paginated(
+        profile,
+        f"rest/agile/1.0/sprint/{sprint_id}/issue",
+        "issues",
+        params={"maxResults": min(args.limit, 100)},
+        max_items=args.limit,
+    )
+    return print_agile_issues(
+        f"Jira sprint | sprint={sprint_id}",
+        issues,
+        profile,
+        args,
+        context={"view": "sprint", "sprint_id": int(sprint_id)},
+    )
+
+
+def command_epics(args: argparse.Namespace, profile: Profile) -> int:
+    board_id = validate_numeric_id(args.board_id, "Board id")
+    epics = fetch_paginated(
+        profile,
+        f"rest/agile/1.0/board/{board_id}/epic",
+        "values",
+        params={"maxResults": min(args.limit, 100)},
+        max_items=args.limit,
+    )
+    if args.json:
+        print(json.dumps({"board_id": board_id, "epics": epics}, indent=2, sort_keys=True))
+        return 0
+    print(f"Jira epics | profile={profile.name} board={board_id} count={len(epics)}")
+    for epic in epics:
+        print(
+            "- "
+            + " | ".join(
+                [
+                    f"id={text(epic.get('id'))}",
+                    f"key={text(epic.get('key'))}",
+                    f"name={text(epic.get('name') or epic.get('summary'))}",
+                    f"done={text(epic.get('done'))}",
+                ]
+            )
+        )
+    return 0
+
+
+def command_epic_issues(args: argparse.Namespace, profile: Profile) -> int:
+    if not ISSUE_KEY_RE.fullmatch(args.epic):
+        raise JiraError(f"Invalid Jira epic key: {args.epic}")
+    issues = fetch_paginated(
+        profile,
+        f"rest/agile/1.0/epic/{urllib.parse.quote(args.epic)}/issue",
+        "issues",
+        params={"maxResults": min(args.limit, 100)},
+        max_items=args.limit,
+    )
+    return print_agile_issues(
+        f"Jira epic | epic={args.epic}",
+        issues,
+        profile,
+        args,
+        context={"view": "epic", "epic": args.epic},
+    )
+
+
+def command_assign_epic(args: argparse.Namespace, profile: Profile) -> int:
+    if not ISSUE_KEY_RE.fullmatch(args.issue_key):
+        raise JiraError(f"Invalid Jira issue key: {args.issue_key}")
+    if not ISSUE_KEY_RE.fullmatch(args.epic):
+        raise JiraError(f"Invalid Jira epic key: {args.epic}")
+    require_project_for_write(profile, args.issue_key.split("-", 1)[0])
+    if not args.confirm:
+        print(
+            "DRY-RUN Jira epic assignment | "
+            + " | ".join(
+                [
+                    f"profile={profile.name}",
+                    f"issue={args.issue_key}",
+                    f"epic={args.epic}",
+                    "confirm=pass --confirm to assign the issue to the epic",
+                ]
+            )
+        )
+        return 0
+
+    request(
+        profile,
+        f"rest/agile/1.0/epic/{urllib.parse.quote(args.epic)}/issue",
+        method="POST",
+        body={"issues": [args.issue_key]},
+        retries=0,
+    )
+    result = {"issue_key": args.issue_key, "epic": args.epic, "profile": profile.name}
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(f"Jira issue assigned to epic | issue={args.issue_key} | epic={args.epic} | profile={profile.name}")
+    return 0
+
+
+def command_assign_sprint(args: argparse.Namespace, profile: Profile) -> int:
+    if not ISSUE_KEY_RE.fullmatch(args.issue_key):
+        raise JiraError(f"Invalid Jira issue key: {args.issue_key}")
+    sprint_id = validate_numeric_id(args.sprint_id, "Sprint id")
+    require_project_for_write(profile, args.issue_key.split("-", 1)[0])
+    if not args.confirm:
+        print(
+            "DRY-RUN Jira sprint assignment | "
+            + " | ".join(
+                [
+                    f"profile={profile.name}",
+                    f"issue={args.issue_key}",
+                    f"sprint={sprint_id}",
+                    "confirm=pass --confirm to assign the issue to the sprint",
+                ]
+            )
+        )
+        return 0
+
+    request(
+        profile,
+        f"rest/agile/1.0/sprint/{sprint_id}/issue",
+        method="POST",
+        body={"issues": [args.issue_key]},
+        retries=0,
+    )
+    result = {"issue_key": args.issue_key, "sprint_id": int(sprint_id), "profile": profile.name}
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(f"Jira issue assigned to sprint | issue={args.issue_key} | sprint={sprint_id} | profile={profile.name}")
+    return 0
+
+
 def search_issues(profile: Profile, jql: str, limit: int, fields: str = DEFAULT_FIELDS) -> list[dict[str, Any]]:
     params = {"jql": jql, "maxResults": limit, "fields": fields}
     data = request(profile, "rest/api/3/search/jql", params=params)
@@ -821,7 +1160,13 @@ def command_list(args: argparse.Namespace, profile: Profile) -> int:
     return 0
 
 
-def fetch_paginated(profile: Profile, path: str, collection_key: str, params: dict[str, Any] | None = None) -> list[Any]:
+def fetch_paginated(
+    profile: Profile,
+    path: str,
+    collection_key: str,
+    params: dict[str, Any] | None = None,
+    max_items: int | None = None,
+) -> list[Any]:
     params = dict(params or {})
     params.setdefault("maxResults", 100)
     params.setdefault("startAt", 0)
@@ -835,6 +1180,8 @@ def fetch_paginated(profile: Profile, path: str, collection_key: str, params: di
         values = data.get(collection_key) or data.get("values") or []
         if isinstance(values, list):
             items.extend(values)
+        if max_items is not None and len(items) >= max_items:
+            return items[:max_items]
 
         start_at = int(data.get("startAt") or params.get("startAt") or 0)
         max_results = int(data.get("maxResults") or params.get("maxResults") or 100)
@@ -884,6 +1231,8 @@ def command_detail(args: argparse.Namespace, profile: Profile) -> int:
     print("fields:")
     for key in ("creator", "reporter"):
         print(f"  {key}: {user_label(fields.get(key))}")
+    print(f"  epic: {reference_label(epic_reference(issue))}")
+    print(f"  sprints: {sprint_label(issue)}")
     print(f"  labels: {', '.join(fields.get('labels') or []) or '-'}")
     print(f"  components: {list_field_names(fields.get('components'))}")
     print(f"  fixVersions: {list_field_names(fields.get('fixVersions'))}")
@@ -1024,10 +1373,54 @@ def require_project_for_write(profile: Profile, project: str) -> None:
         )
 
 
-def build_issue_fields(args: argparse.Namespace) -> dict[str, Any]:
+def resolve_epic_field(profile: Profile, requested: str | None = None) -> str:
+    if requested:
+        if requested != "parent" and not re.fullmatch(r"customfield_[0-9]+", requested):
+            raise JiraError("Epic field must be `parent` or a customfield_<number> id.")
+        return requested
+
+    fields = request(profile, "rest/api/3/field")
+    if not isinstance(fields, list):
+        raise JiraError("Jira returned an invalid field metadata response; pass --epic-field explicitly.")
+
+    parent_available = False
+    epic_link_id = ""
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        field_id = text(field.get("id"), "")
+        name = text(field.get("name"), "").lower()
+        schema = field.get("schema") if isinstance(field.get("schema"), dict) else {}
+        custom = text(schema.get("custom"), "").lower()
+        if field_id == "parent" or name == "parent":
+            parent_available = True
+        if name == "epic link" or "epic-link" in custom:
+            epic_link_id = field_id
+
+    if epic_link_id:
+        return epic_link_id
+    if parent_available:
+        return "parent"
+    raise JiraError(
+        "Jira did not expose an Epic Link or Parent field. Pass --epic-field customfield_<number> "
+        "for the project's epic field."
+    )
+
+
+def epic_assignment_fields(profile: Profile, epic: str, requested_field: str | None = None) -> dict[str, Any]:
+    if not ISSUE_KEY_RE.fullmatch(epic):
+        raise JiraError(f"Invalid Jira epic key: {epic}")
+    field_id = resolve_epic_field(profile, requested_field)
+    return {field_id: {"key": epic}} if field_id == "parent" else {field_id: epic}
+
+
+def build_issue_fields(args: argparse.Namespace, profile: Profile) -> dict[str, Any]:
     fields: dict[str, Any] = {"summary": args.summary}
     if args.description is not None:
         fields["description"] = text_to_adf(args.description)
+    epic = getattr(args, "epic", None)
+    if epic:
+        fields.update(epic_assignment_fields(profile, epic, getattr(args, "epic_field", None)))
     return fields
 
 
@@ -1041,7 +1434,7 @@ def command_create(args: argparse.Namespace, profile: Profile) -> int:
     fields = {
         "project": {"key": args.project},
         "issuetype": {"name": args.issue_type},
-        **build_issue_fields(args),
+        **build_issue_fields(args, profile),
     }
     body = {"fields": fields}
 
@@ -1101,8 +1494,11 @@ def command_edit(args: argparse.Namespace, profile: Profile) -> int:
         fields["description"] = text_to_adf(args.description)
     if args.clear_description:
         fields["description"] = None
+    epic = getattr(args, "epic", None)
+    if epic:
+        fields.update(epic_assignment_fields(profile, epic, getattr(args, "epic_field", None)))
     if not fields:
-        raise JiraError("Pass --summary, --description, or --clear-description to edit an issue.")
+        raise JiraError("Pass --summary, --description, --clear-description, or --epic to edit an issue.")
 
     body = {"fields": fields}
     if not args.confirm:
@@ -1439,6 +1835,49 @@ def build_parser() -> argparse.ArgumentParser:
     projects.add_argument("--json", action="store_true", help="Print raw JSON.")
     projects.set_defaults(handler=command_projects)
 
+    boards = subparsers.add_parser("boards", help="List visible Jira Software boards.")
+    add_common_options(boards, suppress_defaults=True)
+    boards.add_argument("--project", help="Filter boards by Jira project key or id.")
+    boards.add_argument("--limit", type=int, default=25, help="Maximum boards to print.")
+    boards.add_argument("--json", action="store_true", help="Print raw JSON.")
+    boards.set_defaults(handler=command_boards)
+
+    sprints = subparsers.add_parser("sprints", help="List board sprints by state.")
+    add_common_options(sprints, suppress_defaults=True)
+    sprints.add_argument("--board-id", required=True, help="Jira Software board id.")
+    sprints.add_argument("--state", action="append", choices=["active", "future", "closed"], help="Sprint state to include; repeatable.")
+    sprints.add_argument("--limit", type=int, default=25, help="Maximum sprints to print.")
+    sprints.add_argument("--json", action="store_true", help="Print raw JSON.")
+    sprints.set_defaults(handler=command_sprints)
+
+    backlog = subparsers.add_parser("backlog", help="List issues in a board backlog.")
+    add_common_options(backlog, suppress_defaults=True)
+    backlog.add_argument("--board-id", required=True, help="Jira Software board id.")
+    backlog.add_argument("--limit", type=int, default=25, help="Maximum issues to print.")
+    backlog.add_argument("--json", action="store_true", help="Print raw JSON.")
+    backlog.set_defaults(handler=command_backlog)
+
+    sprint = subparsers.add_parser("sprint", help="List issues assigned to one sprint.")
+    add_common_options(sprint, suppress_defaults=True)
+    sprint.add_argument("--sprint-id", required=True, help="Jira sprint id.")
+    sprint.add_argument("--limit", type=int, default=25, help="Maximum issues to print.")
+    sprint.add_argument("--json", action="store_true", help="Print raw JSON.")
+    sprint.set_defaults(handler=command_sprint_issues)
+
+    epics = subparsers.add_parser("epics", help="List epics visible on one Jira Software board.")
+    add_common_options(epics, suppress_defaults=True)
+    epics.add_argument("--board-id", required=True, help="Jira Software board id.")
+    epics.add_argument("--limit", type=int, default=25, help="Maximum epics to print.")
+    epics.add_argument("--json", action="store_true", help="Print raw JSON.")
+    epics.set_defaults(handler=command_epics)
+
+    epic = subparsers.add_parser("epic", help="List issues assigned to one epic.")
+    add_common_options(epic, suppress_defaults=True)
+    epic.add_argument("--epic", required=True, help="Epic issue key.")
+    epic.add_argument("--limit", type=int, default=25, help="Maximum issues to print.")
+    epic.add_argument("--json", action="store_true", help="Print raw JSON.")
+    epic.set_defaults(handler=command_epic_issues)
+
     list_parser = subparsers.add_parser("list", help="List Jira issues as compact CSV-style rows.")
     add_common_options(list_parser, suppress_defaults=True)
     list_parser.add_argument("--project", action="append", help="Project key to search. Repeatable.")
@@ -1491,6 +1930,8 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--issue-type", required=True, help="Jira issue type name, such as Task or Bug.")
     create.add_argument("--summary", required=True, help="Issue summary.")
     create.add_argument("--description", help="Plain-text issue description.")
+    create.add_argument("--epic", help="Epic issue key to assign; Jira's Epic Link or Parent field is detected.")
+    create.add_argument("--epic-field", help="Override epic field id: `parent` or `customfield_<number>`.")
     create.add_argument("--confirm", action="store_true", help="Create the issue after reviewing the dry-run output.")
     create.add_argument("--json", action="store_true", help="Print the created issue reference as JSON.")
     create.set_defaults(handler=command_create)
@@ -1501,6 +1942,8 @@ def build_parser() -> argparse.ArgumentParser:
     edit.add_argument("--summary", help="Replacement issue summary.")
     edit.add_argument("--description", help="Replacement plain-text issue description.")
     edit.add_argument("--clear-description", action="store_true", help="Clear the issue description.")
+    edit.add_argument("--epic", help="Epic issue key to assign; Jira's Epic Link or Parent field is detected.")
+    edit.add_argument("--epic-field", help="Override epic field id: `parent` or `customfield_<number>`.")
     edit.add_argument("--confirm", action="store_true", help="Edit the issue after reviewing the dry-run output.")
     edit.add_argument("--json", action="store_true", help="Print the edited issue reference as JSON.")
     edit.set_defaults(handler=command_edit)
@@ -1527,6 +1970,22 @@ def build_parser() -> argparse.ArgumentParser:
     delete.add_argument("--confirm", action="store_true", help="Delete the issue after reviewing the dry-run output.")
     delete.add_argument("--json", action="store_true", help="Print the deleted issue reference as JSON.")
     delete.set_defaults(handler=command_delete)
+
+    assign_epic = subparsers.add_parser("assign-epic", help="Assign one issue to an epic. Dry-run unless --confirm is passed.")
+    add_common_options(assign_epic, suppress_defaults=True)
+    assign_epic.add_argument("issue_key")
+    assign_epic.add_argument("--epic", required=True, help="Epic issue key.")
+    assign_epic.add_argument("--confirm", action="store_true", help="Assign the issue after reviewing the dry-run output.")
+    assign_epic.add_argument("--json", action="store_true", help="Print the assignment as JSON.")
+    assign_epic.set_defaults(handler=command_assign_epic)
+
+    assign_sprint = subparsers.add_parser("assign-sprint", help="Assign one issue to a sprint. Dry-run unless --confirm is passed.")
+    add_common_options(assign_sprint, suppress_defaults=True)
+    assign_sprint.add_argument("issue_key")
+    assign_sprint.add_argument("--sprint-id", required=True, help="Jira sprint id.")
+    assign_sprint.add_argument("--confirm", action="store_true", help="Assign the issue after reviewing the dry-run output.")
+    assign_sprint.add_argument("--json", action="store_true", help="Print the assignment as JSON.")
+    assign_sprint.set_defaults(handler=command_assign_sprint)
 
     identify = subparsers.add_parser("identify", help="Find Jira issue keys in text and resolve them to profiles.")
     add_common_options(identify, suppress_defaults=True)

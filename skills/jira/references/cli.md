@@ -1,6 +1,6 @@
 ---
 name: jira
-description: Use when an agent needs Jira Cloud project, issue, comment, or attachment reads, or guarded issue creation, editing, commenting, deletion, or one-file uploads.
+description: Use when an agent needs Jira Cloud project, issue, epic, board, sprint, backlog, comment, or attachment reads, or guarded issue creation, editing, commenting, epic/sprint assignment, deletion, or one-file uploads.
 category: providers
 ---
 
@@ -11,6 +11,12 @@ category: providers
 - List configured profiles: `jira profiles`
 - Verify credentials: `jira whoami --profile example`
 - List visible projects: `jira projects --profile example`
+- Discover Jira Software boards: `jira boards --profile example --project APP`
+- List board epics: `jira epics --profile example --board-id 42`
+- List issues in an epic: `jira epic --epic APP-10 --profile example`
+- List active or future sprints: `jira sprints --board-id 42 --state active --profile example`
+- List the board backlog: `jira backlog --board-id 42 --profile example`
+- List issues in a sprint: `jira sprint --sprint-id 7 --profile example`
 - List configured-project issues: `jira list --profile example --limit 10`
 - List one project: `jira list --profile example --project APP --limit 10`
 - Run explicit JQL: `jira search --profile example --jql 'project = APP ORDER BY updated DESC' --limit 10`
@@ -22,8 +28,14 @@ category: providers
 - Confirm one attachment download: `jira attachment --profile example --id EXAMPLE_ATTACHMENT_ID --output /tmp/example-attachment.png --confirm`
 - Dry-run issue creation: `jira create --profile example --project APP --issue-type Task --summary "Example task"`
 - Confirm issue creation: `jira create --profile example --project APP --issue-type Task --summary "Example task" --confirm`
+- Dry-run issue creation with an epic: `jira create --profile example --project APP --issue-type Task --summary "Example task" --epic APP-10`
+- Confirm issue creation with an epic: `jira create --profile example --project APP --issue-type Task --summary "Example task" --epic APP-10 --confirm`
 - Dry-run issue edit: `jira edit APP-252 --profile example --summary "Updated title"`
 - Confirm issue edit: `jira edit APP-252 --profile example --summary "Updated title" --confirm`
+- Dry-run epic assignment: `jira assign-epic APP-252 --profile example --epic APP-10`
+- Confirm epic assignment: `jira assign-epic APP-252 --profile example --epic APP-10 --confirm`
+- Dry-run sprint assignment: `jira assign-sprint APP-252 --profile example --sprint-id 7`
+- Confirm sprint assignment: `jira assign-sprint APP-252 --profile example --sprint-id 7 --confirm`
 - View issue comments: `jira comments APP-252 --profile example`
 - View issue comments in detail: `jira detail APP-252 --profile example`
 - Dry-run one-file upload: `jira upload APP-252 --profile example --file /tmp/example.txt`
@@ -34,7 +46,7 @@ category: providers
 - Confirm issue deletion: `jira delete APP-252 --profile example --confirm`
 - Resolve issue keys from text: `jira identify 'Review APP-252' --all-profiles`
 
-Default output is compact text for agent context. `list` and `search` print CSV-style rows. Use `--json` only for debugging, exports, or consumers that need raw plus normalized Jira fields.
+Default output is compact text for agent context. `list`, `search`, `backlog`, `sprint`, and `epic` print CSV-style rows. Use `--json` only for debugging, exports, or consumers that need raw plus normalized Jira fields.
 
 ## Validation
 
@@ -141,18 +153,18 @@ Keep real tokens in the process environment or a local `.env` only. Never commit
 
 ### Output Shape
 
-`list` and `search` print one CSV row per issue:
+`list`, `search`, `backlog`, `sprint`, and `epic` print one CSV row per issue:
 
 ```text
-key,title,type,status,priority,assignee,updated,project,profile
-APP-252,Example ticket title,Story,To Do,Medium,Alex Example,2026-06-23 12:34,APP,example
+key,title,type,status,priority,assignee,updated,project,epic,sprint,profile
+APP-252,Example ticket title,Story,To Do,Medium,Alex Example,2026-06-23 12:34,APP,APP-10 (Roadmap),7 (Sprint 7) [active],example
 ```
 
 `detail --json` includes raw Jira issue data, paginated raw comments, and a `normalized` object with:
 
 ```text
 key, id, profile, site, url, title, status, description, assignee, reporter,
-creator, project, type, priority, updated, labels, components, fixVersions,
+creator, project, type, priority, updated, labels, components, fixVersions, epic, sprints,
 attachments, comments
 ```
 
@@ -165,6 +177,13 @@ Attachment bytes are never downloaded by `detail` or `attachments`; those comman
 - `search --jql` runs explicit JQL and should stay bounded by project in normal agent use.
 - `identify --all-profiles` uses issue-key prefixes to try matching profiles first, then falls back to other configured profiles.
 - Jira issue keys are not globally unique across sites, so output includes the profile.
+- `boards --project APP` discovers a board id; use that id with `epics`, `sprints`, and `backlog`.
+- `sprints --state active` and `--state future` filter sprint discovery by Jira's sprint state.
+- `backlog` returns issues that Jira places in the selected board backlog; `sprint` returns issues
+  assigned to one sprint. Use `list` or `search` when you need a project-wide view instead.
+- `epics` lists board epics; `epic --epic APP-10` returns the issues Jira assigns to that epic.
+- `create --epic` and `edit --epic` resolve the site's Epic Link or Parent field. Pass
+  `--epic-field parent` or `--epic-field customfield_12345` when field discovery is ambiguous.
 
 ### Safety Notes
 
@@ -177,9 +196,14 @@ Attachment bytes are never downloaded by `detail` or `attachments`; those comman
 - Create is bounded to the configured project allowlist and does not infer an issue type.
 - Upload is bounded to one explicit regular file and the configured project allowlist.
 - Comment creation and issue deletion are guarded mutations, each requiring `--confirm`.
+- Epic and sprint assignment are guarded one-issue mutations, each requiring `--confirm`; they do
+  not start, close, or otherwise manage sprint lifecycle.
 - Comments remain viewable through `comments` and `detail`.
 - Delete targets one issue and never requests deletion of subtasks.
 - The integration does not transition issues, perform bulk operations, or administer projects/sites.
+
+For board discovery, Agile endpoint behavior, pagination, field compatibility, and permission
+troubleshooting, see [Agile workflows](agile.md).
 
 ### Official References
 
@@ -187,3 +211,6 @@ Attachment bytes are never downloaded by `detail` or `attachments`; those comman
 - [Jira issues](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/)
 - [Jira comments](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-comments/)
 - [Jira attachments](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-attachments/)
+- [Jira Software boards](https://developer.atlassian.com/cloud/jira/software/rest/api-group-board/)
+- [Jira Software epics](https://developer.atlassian.com/cloud/jira/software/rest/api-group-epic/)
+- [Jira Software sprints](https://developer.atlassian.com/cloud/jira/software/rest/api-group-sprint/)

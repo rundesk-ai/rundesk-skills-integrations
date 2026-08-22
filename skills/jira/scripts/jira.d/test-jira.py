@@ -863,6 +863,146 @@ class JiraModuleTest(unittest.TestCase):
 
         self.assertEqual(values, [{"id": "1"}])
 
+    def test_issue_normalization_includes_epic_and_sprint_context(self) -> None:
+        issue = self.issue(
+            "APP-252",
+            "APP",
+            epic={"id": "100", "key": "APP-10", "name": "Roadmap"},
+            sprint={"id": 7, "name": "Sprint 7", "state": "active"},
+        )
+
+        normalized = self.module.normalized_issue(issue, self.profile)
+
+        self.assertEqual(normalized["epic"], {"key": "APP-10", "id": "100", "name": "Roadmap"})
+        self.assertEqual(normalized["sprints"][0]["id"], "7")
+        self.assertEqual(normalized["sprints"][0]["state"], "active")
+        self.assertIn("epic=APP-10 (Roadmap)", self.module.issue_line(issue, self.profile))
+        self.assertIn("sprint=7 (Sprint 7) [active]", self.module.issue_line(issue, self.profile))
+
+    def test_boards_filter_by_project_and_bound_results(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, params=None):
+            captured.update({"path": path, "params": params})
+            return {"startAt": 0, "maxResults": 2, "total": 2, "values": [
+                {"id": 42, "name": "App board", "type": "scrum"},
+                {"id": 43, "name": "Other board", "type": "kanban"},
+            ]}
+
+        args = SimpleNamespace(project="APP", limit=2, json=True)
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_boards(args, self.profile)
+
+        self.assertEqual(captured["path"], "rest/agile/1.0/board")
+        self.assertEqual(captured["params"]["projectKeyOrId"], "APP")
+        self.assertEqual(len(json.loads(output.getvalue())["boards"]), 2)
+
+    def test_sprints_pass_state_filter_to_board_endpoint(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, params=None):
+            captured.update({"path": path, "params": params})
+            return {"startAt": 0, "maxResults": 2, "total": 1, "values": [{"id": 7, "name": "Sprint 7", "state": "active"}]}
+
+        args = SimpleNamespace(board_id="42", state=["active", "future"], limit=2, json=True)
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_sprints(args, self.profile)
+
+        self.assertEqual(captured["path"], "rest/agile/1.0/board/42/sprint")
+        self.assertEqual(captured["params"]["state"], "active,future")
+        self.assertEqual(json.loads(output.getvalue())["sprints"][0]["id"], 7)
+
+    def test_backlog_and_epic_commands_fetch_issue_collections(self) -> None:
+        paths = []
+
+        def fake_request(profile, path, params=None):
+            paths.append(path)
+            return {"startAt": 0, "maxResults": 2, "total": 1, "issues": [self.issue("APP-252", "APP")]}
+
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_backlog(SimpleNamespace(board_id="42", limit=2, json=False), self.profile)
+            self.module.command_epic_issues(SimpleNamespace(epic="APP-10", limit=2, json=False), self.profile)
+
+        self.assertEqual(paths, ["rest/agile/1.0/board/42/backlog", "rest/agile/1.0/epic/APP-10/issue"])
+        self.assertIn("Jira backlog | board=42", output.getvalue())
+        self.assertIn("Jira epic | epic=APP-10", output.getvalue())
+
+    def test_assign_epic_is_dry_run_without_confirmation(self) -> None:
+        args = SimpleNamespace(issue_key="APP-252", epic="APP-10", confirm=False, json=False)
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=AssertionError("live write")), redirect_stdout(output):
+            self.module.command_assign_epic(args, self.profile)
+
+        self.assertIn("DRY-RUN Jira epic assignment", output.getvalue())
+
+    def test_assign_epic_posts_one_issue(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, **kwargs):
+            captured.update({"path": path, **kwargs})
+            return None
+
+        args = SimpleNamespace(issue_key="APP-252", epic="APP-10", confirm=True, json=True)
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_assign_epic(args, self.profile)
+
+        self.assertEqual(captured["path"], "rest/agile/1.0/epic/APP-10/issue")
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["body"], {"issues": ["APP-252"]})
+        self.assertEqual(json.loads(output.getvalue())["epic"], "APP-10")
+
+    def test_assign_sprint_posts_numeric_sprint_id(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, **kwargs):
+            captured.update({"path": path, **kwargs})
+            return None
+
+        args = SimpleNamespace(issue_key="APP-252", sprint_id="7", confirm=True, json=True)
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_assign_sprint(args, self.profile)
+
+        self.assertEqual(captured["path"], "rest/agile/1.0/sprint/7/issue")
+        self.assertEqual(captured["body"], {"issues": ["APP-252"]})
+        self.assertEqual(json.loads(output.getvalue())["sprint_id"], 7)
+
+    def test_create_detects_legacy_epic_link_field(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, params=None, **kwargs):
+            if path == "rest/api/3/field":
+                return [{
+                    "id": "customfield_10014",
+                    "name": "Epic Link",
+                    "schema": {"custom": "com.pyxis.greenhopper.jira:gh-epic-link"},
+                }]
+            captured.update({"path": path, **kwargs})
+            return {"id": "10001", "key": "APP-253"}
+
+        args = SimpleNamespace(project="APP", issue_type="Task", summary="Create this", description=None, epic="APP-10", epic_field=None, confirm=True, json=True)
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(io.StringIO()):
+            self.module.command_create(args, self.profile)
+
+        self.assertEqual(captured["body"]["fields"]["customfield_10014"], "APP-10")
+
+    def test_edit_accepts_parent_epic_field_override(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, **kwargs):
+            captured.update({"path": path, **kwargs})
+            return None
+
+        args = SimpleNamespace(issue_key="APP-252", summary=None, description=None, clear_description=False, epic="APP-10", epic_field="parent", confirm=True, json=True)
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(io.StringIO()):
+            self.module.command_edit(args, self.profile)
+
+        self.assertEqual(captured["body"], {"fields": {"parent": {"key": "APP-10"}}})
+
     def test_identify_routes_by_project_prefix_then_falls_back_after_404(self) -> None:
         env = {
             "JIRA_PROFILES": "alpha,beta",
