@@ -1,6 +1,6 @@
 ---
 name: jira
-description: Reading Jira Cloud projects, issues, comments, and attachment metadata.
+description: Reading Jira Cloud projects, issues, comments, and attachment metadata, plus guarded issue creation, editing, and one-file uploads.
 category: providers
 ---
 
@@ -20,6 +20,14 @@ category: providers
 - Fetch attachment metadata: `jira attachments APP-252 --profile example`
 - Dry-run one attachment download: `jira attachment --profile example --id EXAMPLE_ATTACHMENT_ID --output /tmp/example-attachment.png`
 - Confirm one attachment download: `jira attachment --profile example --id EXAMPLE_ATTACHMENT_ID --output /tmp/example-attachment.png --confirm`
+- Dry-run issue creation: `jira create --profile example --project APP --issue-type Task --summary "Example task"`
+- Confirm issue creation: `jira create --profile example --project APP --issue-type Task --summary "Example task" --confirm`
+- Dry-run issue edit: `jira edit APP-252 --profile example --summary "Updated title"`
+- Confirm issue edit: `jira edit APP-252 --profile example --summary "Updated title" --confirm`
+- View issue comments: `jira comments APP-252 --profile example`
+- View issue comments in detail: `jira detail APP-252 --profile example`
+- Dry-run one-file upload: `jira upload APP-252 --profile example --file /tmp/example.txt`
+- Confirm one-file upload: `jira upload APP-252 --profile example --file /tmp/example.txt --confirm`
 - Resolve issue keys from text: `jira identify 'Review APP-252' --all-profiles`
 
 Default output is compact text for agent context. `list` and `search` print CSV-style rows. Use `--json` only for debugging, exports, or consumers that need raw plus normalized Jira fields.
@@ -36,7 +44,9 @@ Default output is compact text for agent context. `list` and `search` print CSV-
   - `jira detail APP-252 --profile example --full --json`
   - `jira attachments APP-252 --profile example`
 
-Do not run `attachment --output --confirm` as a smoke test unless the owner confirms the exact profile, attachment id, and output path.
+Do not run `create --confirm`, `edit --confirm`, `upload --confirm`, or `attachment --output --confirm` as a smoke test
+unless the owner confirms the exact profile and target/effect. Offline tests cover the write request
+method, ADF description conversion, project allowlisting, multipart file upload, dry-runs, and confirmation paths.
 
 ## Provider
 
@@ -58,6 +68,16 @@ issue attachments
 ```
 
 For OAuth-style apps, the broad classic read scope is `read:jira-work`. Granular scopes depend on the app model, but issue detail/comment/attachment reads map to Jira issue, comment, project, user/avatar, and attachment read scopes.
+
+For create and edit, the Atlassian account also needs the Jira project permissions to create and edit
+issues in the selected project. Jira Cloud's issue APIs use `POST /rest/api/3/issue` for creation and
+`PUT /rest/api/3/issue/{issueIdOrKey}` for edits; descriptions are sent as Atlassian Document Format.
+The account's existing API token remains the credential. OAuth apps additionally need the Jira write
+scope documented by Atlassian.
+
+For uploads, the account also needs Browse Projects and Create attachments for the issue's project.
+The command sends one explicit local file as multipart form data and uses Jira's required
+`X-Atlassian-Token: no-check` header. It never uploads a directory or recursively discovers files.
 
 ### Setup
 
@@ -144,7 +164,11 @@ Attachment bytes are never downloaded by `detail` or `attachments`; those comman
 - Prefer service accounts for organization automation when available.
 - Rotate any token that was pasted into chat or logs.
 - Keep live checks small and bounded.
-- The integration does not create, edit, transition, comment on, upload to, or delete Jira issues.
+- Create and edit are guarded mutations: they print a dry-run and require `--confirm`.
+- Create is bounded to the configured project allowlist and does not infer an issue type.
+- Upload is bounded to one explicit regular file and the configured project allowlist.
+- Comments remain read-only and viewable through `comments` and `detail`.
+- The integration does not transition, comment on, or delete Jira issues.
 
 ### Official References
 

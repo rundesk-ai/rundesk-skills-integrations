@@ -12,6 +12,9 @@ Usage:
   jira comments APP-123 [--profile example] [--json]
   jira attachments APP-123 [--profile example] [--json]
   jira attachment --id EXAMPLE_ATTACHMENT_ID --output /tmp/example.png [--profile example] [--confirm]
+  jira create --project APP --issue-type Task --summary "Example task" [--description TEXT] [--profile example] [--confirm]
+  jira edit APP-123 [--summary TEXT] [--description TEXT] [--clear-description] [--profile example] [--confirm]
+  jira upload APP-123 --file /path/to/file [--profile example] [--confirm]
   jira identify "Fix APP-123" [--all-profiles]
 
 Inputs:
@@ -22,8 +25,8 @@ Inputs:
 
 Outputs:
   Writes compact text summaries to stdout. List/search output is CSV-style rows.
-  No raw JSON unless --json is provided. The integration does not mutate Jira.
-  Attachment bytes are downloaded only by the explicit attachment --output --confirm command.
+  No raw JSON unless --json is provided. Create and edit are dry-runs unless --confirm is passed.
+  Attachment downloads, uploads, creates, and edits require explicit commands and confirmation.
 """
 
 from __future__ import annotations
@@ -32,12 +35,14 @@ import argparse
 import base64
 import csv
 import json
+import mimetypes
 import os
 import re
 import sys
 import tempfile
 import textwrap
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -365,7 +370,14 @@ def request(
     path: str,
     params: dict[str, Any] | None = None,
     retries: int = 2,
+    method: str = "GET",
+    body: dict[str, Any] | None = None,
+    raw_body: bytes | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> Any:
+    if body is not None and raw_body is not None:
+        raise JiraError("Jira request cannot contain both JSON and raw bodies.")
+
     url = validate_base_url(profile.base_url) + "/" + path.lstrip("/")
     if params:
         url += "?" + urllib.parse.urlencode(params, doseq=True)
@@ -375,9 +387,17 @@ def request(
         "Accept": "application/json",
         "User-Agent": "workspace-jira/1.0",
     }
+    data = None
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(body).encode("utf-8")
+    elif raw_body is not None:
+        data = raw_body
+    if extra_headers:
+        headers.update(extra_headers)
 
     for attempt in range(retries + 1):
-        req = urllib.request.Request(url, headers=headers, method="GET")
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with open_url(req, timeout=30) as response:
                 raw = response.read().decode("utf-8", errors="replace")
@@ -979,6 +999,229 @@ def command_attachment(args: argparse.Namespace, profile: Profile) -> int:
     return 0
 
 
+def text_to_adf(value: str) -> dict[str, Any]:
+    paragraphs = []
+    for line in value.splitlines() or [""]:
+        paragraph: dict[str, Any] = {"type": "paragraph"}
+        if line:
+            paragraph["content"] = [{"type": "text", "text": line}]
+        paragraphs.append(paragraph)
+    return {"type": "doc", "version": 1, "content": paragraphs}
+
+
+def require_project_for_write(profile: Profile, project: str) -> None:
+    if not profile.projects:
+        raise JiraError(
+            f"Profile {profile.name} has no configured project allowlist; refusing Jira write. "
+            "Set JIRA_PROJECTS for the account first."
+        )
+    if project not in profile.projects:
+        raise JiraError(
+            f"Refusing Jira write outside configured project allowlist: {project}. "
+            f"Allowed: {', '.join(profile.projects)}"
+        )
+
+
+def build_issue_fields(args: argparse.Namespace) -> dict[str, Any]:
+    fields: dict[str, Any] = {"summary": args.summary}
+    if args.description is not None:
+        fields["description"] = text_to_adf(args.description)
+    return fields
+
+
+def command_create(args: argparse.Namespace, profile: Profile) -> int:
+    require_project_for_write(profile, args.project)
+    if not args.summary.strip():
+        raise JiraError("Issue summary must not be empty.")
+    if not args.issue_type.strip():
+        raise JiraError("Issue type must not be empty.")
+
+    fields = {
+        "project": {"key": args.project},
+        "issuetype": {"name": args.issue_type},
+        **build_issue_fields(args),
+    }
+    body = {"fields": fields}
+
+    if not args.confirm:
+        print(
+            "DRY-RUN Jira issue create | "
+            + " | ".join(
+                [
+                    f"profile={profile.name}",
+                    f"project={args.project}",
+                    f"issue_type={args.issue_type}",
+                    f"fields={json.dumps(fields, ensure_ascii=False, sort_keys=True)}",
+                    "confirm=pass --confirm to create the issue",
+                ]
+            )
+        )
+        return 0
+
+    response = request(profile, "rest/api/3/issue", method="POST", body=body, retries=0)
+    if not isinstance(response, dict) or not response.get("key"):
+        raise JiraError(f"Jira create returned an unexpected response: {response}")
+
+    result = {
+        "issue_key": response["key"],
+        "issue_id": response.get("id"),
+        "profile": profile.name,
+        "url": f"{profile.base_url}/browse/{response['key']}",
+    }
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(
+            "Jira issue created | "
+            + " | ".join(
+                [
+                    f"profile={profile.name}",
+                    f"issue={response['key']}",
+                    f"url={result['url']}",
+                ]
+            )
+        )
+    return 0
+
+
+def command_edit(args: argparse.Namespace, profile: Profile) -> int:
+    if not ISSUE_KEY_RE.fullmatch(args.issue_key):
+        raise JiraError(f"Invalid Jira issue key: {args.issue_key}")
+    require_project_for_write(profile, args.issue_key.split("-", 1)[0])
+    if args.description is not None and args.clear_description:
+        raise JiraError("Pass either --description or --clear-description, not both.")
+    fields: dict[str, Any] = {}
+    if args.summary is not None:
+        if not args.summary.strip():
+            raise JiraError("Issue summary must not be empty.")
+        fields["summary"] = args.summary
+    if args.description is not None:
+        fields["description"] = text_to_adf(args.description)
+    if args.clear_description:
+        fields["description"] = None
+    if not fields:
+        raise JiraError("Pass --summary, --description, or --clear-description to edit an issue.")
+
+    body = {"fields": fields}
+    if not args.confirm:
+        print(
+            "DRY-RUN Jira issue edit | "
+            + " | ".join(
+                [
+                    f"profile={profile.name}",
+                    f"issue={args.issue_key}",
+                    f"fields={json.dumps(fields, ensure_ascii=False, sort_keys=True)}",
+                    "confirm=pass --confirm to edit the issue",
+                ]
+            )
+        )
+        return 0
+
+    request(
+        profile,
+        f"rest/api/3/issue/{urllib.parse.quote(args.issue_key)}",
+        method="PUT",
+        body=body,
+        retries=0,
+    )
+    result = {"issue_key": args.issue_key, "profile": profile.name, "edited_fields": sorted(fields)}
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(
+            "Jira issue edited | "
+            + " | ".join(
+                [
+                    f"profile={profile.name}",
+                    f"issue={args.issue_key}",
+                    f"fields={','.join(sorted(fields))}",
+                ]
+            )
+        )
+    return 0
+
+
+def multipart_file_body(file_path: Path) -> tuple[bytes, str, str]:
+    boundary = f"----RundeskJira{uuid.uuid4().hex}"
+    filename = re.sub(r'[\r\n"\\]', "_", file_path.name)
+    content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+    content = file_path.read_bytes()
+    header = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode("utf-8")
+    footer = f"\r\n--{boundary}--\r\n".encode("ascii")
+    return header + content + footer, boundary, content_type
+
+
+def command_upload(args: argparse.Namespace, profile: Profile) -> int:
+    if not ISSUE_KEY_RE.fullmatch(args.issue_key):
+        raise JiraError(f"Invalid Jira issue key: {args.issue_key}")
+    require_project_for_write(profile, args.issue_key.split("-", 1)[0])
+
+    file_path = Path(args.file).expanduser()
+    if file_path.is_symlink() or not file_path.is_file():
+        raise JiraError(f"Attachment file does not exist or is not a regular file: {file_path}")
+    file_size = file_path.stat().st_size
+
+    if not args.confirm:
+        print(
+            "DRY-RUN Jira attachment upload | "
+            + " | ".join(
+                [
+                    f"profile={profile.name}",
+                    f"issue={args.issue_key}",
+                    f"file={file_path}",
+                    f"bytes={file_size}",
+                    "confirm=pass --confirm to upload the file",
+                ]
+            )
+        )
+        return 0
+
+    body, boundary, content_type = multipart_file_body(file_path)
+    response = request(
+        profile,
+        f"rest/api/3/issue/{urllib.parse.quote(args.issue_key)}/attachments",
+        method="POST",
+        raw_body=body,
+        extra_headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "X-Atlassian-Token": "no-check",
+        },
+        retries=0,
+    )
+    if not isinstance(response, list) or not all(isinstance(item, dict) for item in response):
+        raise JiraError(f"Jira attachment upload returned an unexpected response: {response}")
+
+    result = {
+        "issue_key": args.issue_key,
+        "profile": profile.name,
+        "file": file_path.name,
+        "bytes": file_size,
+        "content_type": content_type,
+        "attachments": response,
+    }
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        attachment_ids = ",".join(str(item.get("id", "-")) for item in response)
+        print(
+            "Jira attachment uploaded | "
+            + " | ".join(
+                [
+                    f"profile={profile.name}",
+                    f"issue={args.issue_key}",
+                    f"file={file_path.name}",
+                    f"bytes={file_size}",
+                    f"attachment_ids={attachment_ids or '-'}",
+                ]
+            )
+        )
+    return 0
+
+
 def publish_bytes_exclusive(output: Path, content: bytes) -> None:
     if output.is_symlink() or output.exists():
         raise JiraError(f"Refusing to overwrite existing output path: {output}")
@@ -1076,6 +1319,9 @@ def build_parser() -> argparse.ArgumentParser:
               jira comments APP-252 --profile example
               jira attachments APP-252 --profile example
               jira attachment --profile example --id EXAMPLE_ATTACHMENT_ID --output /tmp/example.png --confirm
+              jira create --profile example --project APP --issue-type Task --summary "Example task" --confirm
+              jira edit APP-252 --profile example --summary "Updated title" --confirm
+              jira upload APP-252 --profile example --file /tmp/example.png --confirm
               jira identify "Fix APP-252" --all-profiles
             """
         ),
@@ -1145,6 +1391,34 @@ def build_parser() -> argparse.ArgumentParser:
     attachment.add_argument("--output", required=True, help="Local file path to write. Existing files are not overwritten.")
     attachment.add_argument("--confirm", action="store_true", help="Actually download and write the attachment bytes.")
     attachment.set_defaults(handler=command_attachment)
+
+    create = subparsers.add_parser("create", help="Create one Jira issue. Dry-run unless --confirm is passed.")
+    add_common_options(create, suppress_defaults=True)
+    create.add_argument("--project", required=True, help="Configured Jira project key.")
+    create.add_argument("--issue-type", required=True, help="Jira issue type name, such as Task or Bug.")
+    create.add_argument("--summary", required=True, help="Issue summary.")
+    create.add_argument("--description", help="Plain-text issue description.")
+    create.add_argument("--confirm", action="store_true", help="Create the issue after reviewing the dry-run output.")
+    create.add_argument("--json", action="store_true", help="Print the created issue reference as JSON.")
+    create.set_defaults(handler=command_create)
+
+    edit = subparsers.add_parser("edit", help="Edit one Jira issue. Dry-run unless --confirm is passed.")
+    add_common_options(edit, suppress_defaults=True)
+    edit.add_argument("issue_key")
+    edit.add_argument("--summary", help="Replacement issue summary.")
+    edit.add_argument("--description", help="Replacement plain-text issue description.")
+    edit.add_argument("--clear-description", action="store_true", help="Clear the issue description.")
+    edit.add_argument("--confirm", action="store_true", help="Edit the issue after reviewing the dry-run output.")
+    edit.add_argument("--json", action="store_true", help="Print the edited issue reference as JSON.")
+    edit.set_defaults(handler=command_edit)
+
+    upload = subparsers.add_parser("upload", help="Upload one file to a Jira issue. Dry-run unless --confirm is passed.")
+    add_common_options(upload, suppress_defaults=True)
+    upload.add_argument("issue_key")
+    upload.add_argument("--file", required=True, help="One existing local file to upload.")
+    upload.add_argument("--confirm", action="store_true", help="Upload the file after reviewing the dry-run output.")
+    upload.add_argument("--json", action="store_true", help="Print uploaded attachment metadata as JSON.")
+    upload.set_defaults(handler=command_upload)
 
     identify = subparsers.add_parser("identify", help="Find Jira issue keys in text and resolve them to profiles.")
     add_common_options(identify, suppress_defaults=True)

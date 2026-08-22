@@ -1,6 +1,6 @@
 ---
 name: jira
-description: Use when the user needs facts from an existing Jira Cloud issue, project, backlog, comment, or attachment, including when they provide only an issue or project key. It supplies account-scoped searches and issue detail. Do not use to plan work generally or to create, edit, transition, or comment on Jira issues.
+description: Use when the user needs facts from an existing Jira Cloud issue, project, backlog, comment, or attachment, or asks to create, edit, or attach a file to a Jira issue. It supplies account-scoped searches, issue detail, and guarded issue writes. Do not use to plan work generally or to transition, comment on, or delete Jira issues.
 ---
 
 # Jira
@@ -24,8 +24,17 @@ Use compact output by default:
 "$RUNDESK_SKILLS/jira/scripts/jira" detail <KEY-123> --profile <profile> --full
 "$RUNDESK_SKILLS/jira/scripts/jira" comments <KEY-123> --profile <profile>
 "$RUNDESK_SKILLS/jira/scripts/jira" attachments <KEY-123> --profile <profile>
+"$RUNDESK_SKILLS/jira/scripts/jira" create --profile <profile> --project <key> --issue-type <name> --summary '<text>'
+"$RUNDESK_SKILLS/jira/scripts/jira" edit <KEY-123> --profile <profile> --summary '<text>'
+"$RUNDESK_SKILLS/jira/scripts/jira" upload <KEY-123> --profile <profile> --file /path/to/file
 ```
 
 Keep JQL bounded to one project. Use `--json` only when raw structured data is required.
-Jira is read-only. An attachment download writes only to an explicit new local path and
-requires the owner's approval for that attachment and path before `--confirm`.
+Create and edit are dry-runs by default. Review the exact project, issue type, issue key, and
+fields, then pass `--confirm` to perform the live write. Create refuses projects outside the
+profile's configured `JIRA_PROJECTS` allowlist. The write surface is limited to issue creation,
+summary/description replacement, and one-file attachment upload; it does not transition, comment
+on, or delete issues.
+Comments remain viewable through `comments` and `detail`. Attachment metadata remains viewable
+through `attachments`, and one file can be uploaded with `upload`. Uploads and attachment downloads
+write only after approval of the exact issue/file or attachment/path and `--confirm`.
