@@ -1,6 +1,6 @@
 ---
 name: confluence
-description: Use when the user needs to inspect Confluence Cloud spaces, pages, page trees, comments, or attachments, or to edit an existing page. It supplies account-scoped reads and guarded page edits with explicit version confirmation. Do not use to create, delete, move, comment on, or attach files to Confluence content, or to read Jira issues.
+description: Use when the user needs to read Confluence Cloud spaces, pages, page trees, comments, or attachments, or edit an existing page. It provides account-scoped reads and guarded page edits with explicit version confirmation. Do not use to create, delete, move, comment on, or attach files to Confluence content, or to read Jira issues.
 ---
 
 # Confluence
