@@ -1,6 +1,6 @@
 ---
 name: jira
-description: Reading Jira Cloud projects, issues, comments, and attachment metadata, plus guarded issue creation, editing, commenting, deletion, and one-file uploads.
+description: Use when an agent needs Jira Cloud project, issue, comment, or attachment reads, or guarded issue creation, editing, commenting, deletion, or one-file uploads.
 category: providers
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: jira
-description: Use when the user needs to read Jira Cloud projects, issues, comments, or attachments, or create, edit, comment on, attach one file to, or delete an issue. It provides account-scoped reads and guarded issue mutations with explicit confirmation. Do not use for Jira transitions, bulk operations, or project and site administration.
+description: Use when the user asks to inspect Jira Cloud projects, issues, comments, or attachments, or to create, edit, comment on, attach a file to, or delete an issue. It supplies account-scoped Jira reads and guarded issue mutations with explicit confirmation. Do not use it for Jira transitions, bulk operations, or project and site administration.
 ---
 
 # Jira
