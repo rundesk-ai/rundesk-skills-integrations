@@ -6,7 +6,7 @@ declarations, and offline tests. Every skill is an independently installable run
 ## Skills
 
 - `cloudflare` - zones, domains, registrar checks, and guarded DNS or domain changes.
-- `confluence` - spaces, trees, search, and page content.
+- `confluence` - spaces, trees, search, page content, and guarded edits to existing pages.
 - `coolify` - servers, resources, deployments, logs, and guarded operational changes.
 - `discord` - servers, channels, threads, history, and guarded messages, replies, and reactions.
 - `grafana` - read-only Grafana Loki discovery, labels, bounded LogQL searches, filters, and error

@@ -1,6 +1,6 @@
 ---
 name: confluence
-description: Reading Confluence Cloud spaces, page lists, page trees, search results, and page detail.
+description: Use when an agent needs Confluence Cloud space, page-list, tree, search, or page-detail reads, or guarded edits to existing pages with version confirmation.
 category: providers
 ---
 
@@ -18,8 +18,18 @@ category: providers
 - Run explicit CQL: `confluence search --profile example --cql 'space = "DOCS" and type = page order by lastmodified desc' --limit 10`
 - Fetch page detail: `confluence page EXAMPLE_PAGE_ID --profile example --full`
 - Fetch page JSON with normalized body text: `confluence page EXAMPLE_PAGE_ID --profile example --full --json`
+- Preview a page title edit: `confluence edit EXAMPLE_PAGE_ID --profile example --title "Updated title"`
+- Preview a body edit from storage XHTML: `confluence edit EXAMPLE_PAGE_ID --profile example --body-file page.xhtml`
+- Confirm the reviewed version: `confluence edit EXAMPLE_PAGE_ID --profile example --body-file page.xhtml --confirm --expected-version 3`
 
 Default output is compact text for agent context. `list` prints CSV-style page rows, `tree` prints an indented page hierarchy, and `search` prints compact page cards. Use `--json` only for debugging, exports, or consumers that need raw plus normalized Confluence fields.
+
+Edits default to a dry-run. The dry-run fetches the current page version and prints the target
+space, next version, title, body character count, and body SHA-256. A confirmed edit must include
+that current version in `--expected-version`; the command refuses the update if the page changed
+since the preview. `--body` and `--body-file` contain Confluence storage XHTML, not Markdown. Omit
+`--title` or the body option to preserve that part of the page. A body file must be one explicit
+regular local file.
 
 ## Validation
 
@@ -158,13 +168,23 @@ Confluence tree | profile=example site=Example Docs space=DOCS pages=2
 - `list` and `tree` require `--space` to avoid broad accidental scans.
 - `tree --root PAGE_ID` uses Confluence's descendants endpoint; rootless `tree --space` builds a hierarchy from pages returned for that space.
 
+### Write permissions
+
+Editing requires permission to view the page and its space, permission to update pages in the
+space, and an OAuth/Connect app scope that permits Confluence page writes. Exact permission and
+scope names depend on the Atlassian authentication model; the command still enforces the
+profile's configured space allowlist locally.
+
 ### Safety Notes
 
 - Tokens belong in local `.env`, never committed docs, examples, or chat logs.
 - Provider base URLs must be HTTPS origins. Authorization is retained only for same-origin redirects and is stripped before a cross-origin redirect.
 - Some spaces contain sensitive operational notes. Keep live checks small and targeted.
 - Raw `--json` output can include full page bodies and should not be pasted into public systems.
-- The integration does not create, edit, move, delete, comment on, or upload Confluence content.
+- Page edits require `--confirm` and the exact `--expected-version` shown by a dry-run.
+- Edits use one page id, preserve omitted title/body fields, and send no automatic retries for the
+  confirmed update to avoid duplicate version creation after an uncertain network result.
+- The integration does not create, delete, move, comment on, or upload Confluence content.
 
 ### Official References
 
