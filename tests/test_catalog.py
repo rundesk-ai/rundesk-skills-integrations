@@ -55,8 +55,8 @@ ISSUE_TEMPLATE_CONTRACTS = {
         ("name: Bug report", "about: Report reproducible incorrect behavior",
          'title: "[Bug] "', 'labels: ""', 'assignees: ""'),
         ("## Problem", "## Reproduction", "## Expected behavior", "## Evidence",
-         "## Acceptance criteria", "## Environment", "## Scope and privacy"),
-        "9b8bb222a68b4c2a592512ee368c17bc8edc8e0750c5f76ba3e4dd65837e5187",
+         "## Acceptance criteria", "## Environment", "## Scope and privacy", "## Agent"),
+        "6e8eadbdaf3198c29ed33edf6b3abaf7374cfca5adb05d46c85daedeb1281276",
     ),
     "change-proposal.md": (
         ("name: Change proposal",
@@ -64,8 +64,8 @@ ISSUE_TEMPLATE_CONTRACTS = {
          'title: "[Proposal] "', 'labels: ""', 'assignees: ""'),
         ("## Problem", "## Proposed solution", "## Evidence",
          "## Scope and compatibility", "## Acceptance criteria", "## Verification",
-         "## Alternatives considered"),
-        "71f68d702f29e1cedd6b5a839b8a10df899240f68bd215d734ee77f5286cd379",
+         "## Alternatives considered", "## Agent"),
+        "82c13fe89d21778e23de6c9a7ae7e918960cf78d4b2cccd69041e9160e97fdbd",
     ),
 }
 AGENT_GUIDE_ANCHORS = {
@@ -181,6 +181,7 @@ class IntegrationCatalog(unittest.TestCase):
                 text = raw.decode("utf-8")
                 self.assertEqual(["", *frontmatter], text.split("---", 2)[1].splitlines())
                 self.assertEqual(headings, self.markdown_headings(path))
+                self.assertIn("🤖 by <Agent>", text)
                 self.assertEqual(digest, hashlib.sha256(raw).hexdigest())
 
     def test_readme_follows_the_catalog_contract(self):
