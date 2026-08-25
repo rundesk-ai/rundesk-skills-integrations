@@ -1,6 +1,6 @@
 ---
 name: jira
-description: Use when the user asks to inspect Jira Cloud projects, issues, epics, boards, sprints, backlog, comments, or attachments; filter issues by epic or sprint state; or create, edit, comment on, attach a file to, assign, or delete an issue. It supplies account-scoped Jira reads and guarded issue mutations with explicit confirmation. Do not use it for Jira transitions, bulk operations, or project and site administration.
+description: Use when the user asks to inspect Jira Cloud projects, issues, epics, boards, sprints, backlog, comments, or attachments; filter issues by epic or sprint state; or create, edit, comment on, attach a file to, assign, or delete an issue. It supplies account-scoped Jira reads and guarded issue mutations with explicit confirmation, rendering markdown descriptions and comments into Jira's own formatting. Do not use it for Jira transitions, bulk operations, or project and site administration.
 ---
 
 # Jira
@@ -8,7 +8,8 @@ description: Use when the user asks to inspect Jira Cloud projects, issues, epic
 Run `$RUNDESK_SKILLS/jira/scripts/jira`; it resolves credentials itself, so never inspect or print
 their source. Read `references/cli.md` for setup, environment keys, output fields, API behavior, or
 validation. Read `references/agile.md` when the task involves board discovery, epics, sprints,
-backlog filtering, assignment, pagination, or Jira Software permissions.
+backlog filtering, assignment, pagination, or Jira Software permissions. Read
+`references/ticket-format.md` before writing any issue description or comment body.
 
 Start with `"$RUNDESK_SKILLS/jira/scripts/jira" profiles`. Use each profile's configured
 project allowlist. When an issue prefix is unclear, run:
@@ -41,6 +42,14 @@ Use compact output by default:
 "$RUNDESK_SKILLS/jira/scripts/jira" comment <KEY-123> --profile <profile> --body '<text>'
 "$RUNDESK_SKILLS/jira/scripts/jira" delete <KEY-123> --profile <profile>
 ```
+
+Descriptions and comment bodies are markdown. Write a real ticket, never a wall of prose — state
+the objective, the background, why it matters, the requirements, and the acceptance criteria that
+prove it is done. `create` refuses a description with no headings or missing its issue type's
+sections; `--freeform` skips that check and should stay rare. `edit` is not structure-checked, so
+keep the template when replacing a whole description. Pass anything structured with
+`--description-file` or `--body-file`, never a multi-line shell argument. Read
+`references/ticket-format.md` for the templates, the section names, and the markdown it renders.
 
 Keep JQL bounded to one project. Use `--json` only when raw structured data is required.
 All mutations are dry-runs by default. Review the exact project, issue key, fields, comment body,

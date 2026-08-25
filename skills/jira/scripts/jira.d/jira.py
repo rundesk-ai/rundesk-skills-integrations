@@ -342,15 +342,22 @@ def text(value: Any, fallback: str = "-") -> str:
     return value if value else fallback
 
 
-def truncate(value: Any, limit: int = 180) -> str:
-    value = text(value)
+def clip(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
-
     if limit <= 3:
         return value[:limit]
-
     return value[: limit - 3].rstrip() + "..."
+
+
+def truncate(value: Any, limit: int = 180) -> str:
+    return clip(text(value), limit)
+
+
+def truncate_block(value: Any, limit: int = 180) -> str:
+    """Truncate multi-line text without collapsing it; `truncate` is for one-line rows."""
+    rendered = "" if value is None else str(value).strip()
+    return clip(rendered, limit) if rendered else "-"
 
 
 def compact_datetime(value: Any) -> str:
@@ -480,32 +487,166 @@ def request_bytes(
     raise JiraError(f"Jira attachment download exhausted retries profile={profile.name}")
 
 
+MARK_WRAPPERS = (("code", "`"), ("strike", "~~"), ("strong", "**"), ("em", "*"))
+
+# A mention, emoji, status, or smart-link node holds no `text` child: its content is in
+# `attrs`. Reading one back must not silently drop who was named or what was flagged.
+ATTRS_TEXT_KEYS = ("text", "shortName", "url", "title")
+
+
+def attrs_text(node: dict[str, Any]) -> str:
+    attrs = node.get("attrs")
+    if not isinstance(attrs, dict):
+        return ""
+    for key in ATTRS_TEXT_KEYS:
+        value = attrs.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def marked_text(node: dict[str, Any]) -> str:
+    """Re-apply the markdown a mark stands for, so a read-back can be re-rendered."""
+    value = str(node.get("text") or "")
+    if not value:
+        return ""
+    marks = {mark.get("type"): mark for mark in node.get("marks") or [] if isinstance(mark, dict)}
+    for name, wrapper in MARK_WRAPPERS:
+        if name in marks:
+            value = wrapper + value + wrapper
+    link = marks.get("link")
+    if link:
+        href = str((link.get("attrs") or {}).get("href") or "")
+        if href:
+            value = "[" + value + "](" + href + ")"
+    return value
+
+
+def adf_inline_text(nodes: Any) -> str:
+    """Rebuild a paragraph's markdown.
+
+    Only two adjacent unmarked text nodes get a space inserted between them; a mark
+    boundary already carries whatever spacing the author wrote, and inventing one
+    there turns `foo`bar`baz` into `foo `bar` baz`.
+    """
+    pieces: list[tuple[str, bool]] = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        if node.get("type") == "hardBreak":
+            pieces.append(("\n", True))
+            continue
+        if node.get("type") == "text":
+            pieces.append((marked_text(node), bool(node.get("marks"))))
+            continue
+        nested = adf_inline_text(node.get("content")) or attrs_text(node)
+        if nested:
+            pieces.append((nested, True))
+    joined = ""
+    previous_boundary = True
+    for piece, boundary in pieces:
+        if not piece:
+            continue
+        if not joined:
+            joined = piece
+        elif piece == "\n" or joined.endswith("\n") or boundary or previous_boundary:
+            joined += piece
+        else:
+            joined = join_inline_text([joined, piece])
+        previous_boundary = boundary
+    return joined
+
+
+def adf_list_text(node: dict[str, Any], depth: int) -> str:
+    ordered = node.get("type") == "orderedList"
+    number = int((node.get("attrs") or {}).get("order") or 1) if ordered else 0
+    lines: list[str] = []
+    for item in node.get("content") or []:
+        if not isinstance(item, dict):
+            continue
+        marker = (str(number) + ". ") if ordered else "- "
+        number += 1
+        blocks = [
+            adf_block_text(child, depth + 1)
+            for child in item.get("content") or []
+            if isinstance(child, dict)
+        ]
+        body = "\n".join(block for block in blocks if block)
+        indent = "  " * depth
+        first, _, rest = body.partition("\n")
+        lines.append(indent + marker + first)
+        for line in rest.splitlines():
+            lines.append(indent + "  " + line if line and not line.startswith(" ") else line)
+    return "\n".join(lines)
+
+
+def adf_block_text(node: dict[str, Any], depth: int = 0) -> str:
+    node_type = node.get("type")
+
+    if node_type == "text":
+        return marked_text(node)
+    if node_type == "hardBreak":
+        return "\n"
+    if node_type == "rule":
+        return "---"
+    if node_type in ("paragraph", "heading"):
+        inline = adf_inline_text(node.get("content"))
+        if node_type == "paragraph":
+            return inline
+        level = int((node.get("attrs") or {}).get("level") or 1)
+        return ("#" * max(1, min(level, 6)) + " " + inline).rstrip()
+    if node_type == "codeBlock":
+        language = str((node.get("attrs") or {}).get("language") or "")
+        body = "".join(
+            str(child.get("text") or "")
+            for child in node.get("content") or []
+            if isinstance(child, dict)
+        )
+        return "```" + language + "\n" + body + "\n```"
+    if node_type in ("bulletList", "orderedList"):
+        return adf_list_text(node, depth)
+    if node_type == "blockquote":
+        inner = "\n".join(
+            adf_block_text(child, depth)
+            for child in node.get("content") or []
+            if isinstance(child, dict)
+        )
+        return "\n".join("> " + line if line else ">" for line in inner.splitlines())
+
+    pieces = []
+    if node.get("text"):
+        pieces.append(marked_text(node))
+    elif not node.get("content"):
+        carried = attrs_text(node)
+        if carried:
+            pieces.append(carried)
+    for child in node.get("content") or []:
+        if isinstance(child, dict):
+            rendered = adf_block_text(child, depth)
+            if rendered:
+                pieces.append(rendered)
+    return "\n".join(pieces)
+
+
 def adf_to_text(value: Any) -> str:
+    """Flatten ADF back to the markdown it came from, so structure survives a read."""
     if value is None:
         return ""
     if isinstance(value, str):
         return value
     if isinstance(value, list):
-        parts = []
-        for item in value:
-            part = adf_to_text(item)
-            if part:
-                parts.append(part)
-        return "\n".join(parts)
+        return "\n".join(part for part in (adf_to_text(item) for item in value) if part)
     if not isinstance(value, dict):
         return str(value)
 
-    node_type = value.get("type")
-    pieces = []
-    if value.get("text"):
-        pieces.append(str(value["text"]))
-    for child in value.get("content") or []:
-        child_text = adf_to_text(child)
-        if child_text:
-            pieces.append(child_text)
-
-    joined = join_inline_text(pieces) if node_type == "paragraph" else "\n".join(pieces)
-    return joined.strip()
+    if value.get("type") == "doc":
+        blocks = [
+            adf_block_text(child)
+            for child in value.get("content") or []
+            if isinstance(child, dict)
+        ]
+        return "\n\n".join(block for block in blocks if block).strip()
+    return adf_block_text(value).strip()
 
 
 def join_inline_text(pieces: list[str]) -> str:
@@ -1246,14 +1387,14 @@ def command_detail(args: argparse.Namespace, profile: Profile) -> int:
     description = adf_to_text(fields.get("description"))
     if description:
         print("description:")
-        print(textwrap.indent(truncate(description, args.description_limit), "  "))
+        print(textwrap.indent(truncate_block(description, args.description_limit), "  "))
 
     if comments:
         print(f"comments: count={len(comments)}")
         for comment in comments[: args.comment_limit]:
             author = user_label(comment.get("author"))
             created = text(comment.get("created"))
-            body = truncate(adf_to_text(comment.get("body")), args.description_limit)
+            body = truncate_block(adf_to_text(comment.get("body")), args.description_limit)
             print(f"  - author={author} created={created}")
             if body:
                 print(textwrap.indent(body, "    "))
@@ -1288,7 +1429,7 @@ def command_comments(args: argparse.Namespace, profile: Profile) -> int:
                 ]
             )
         )
-        body = truncate(item.get("body"), args.body_limit)
+        body = truncate_block(item.get("body"), args.body_limit)
         if body and body != "-":
             print(textwrap.indent(body, "  "))
     return 0
@@ -1350,14 +1491,410 @@ def command_attachment(args: argparse.Namespace, profile: Profile) -> int:
     return 0
 
 
-def text_to_adf(value: str) -> dict[str, Any]:
-    paragraphs = []
-    for line in value.splitlines() or [""]:
+# Markdown to Atlassian Document Format.
+#
+# Jira Cloud stores rich text as ADF, so a description sent as one paragraph per line
+# renders every heading, bullet, and fence as literal punctuation. This renders the
+# small markdown subset a ticket actually needs, and degrades anything it does not
+# understand to literal text rather than dropping it.
+
+FENCE_RE = re.compile(r"^\s{0,3}(?P<fence>`{3,}|~{3,})\s*(?P<lang>[^`\s]*)\s*$")
+HEADING_RE = re.compile(r"^\s{0,3}(?P<hashes>#{1,6})(?:\s+(?P<text>.*?))?\s*$")
+RULE_RE = re.compile(r"^\s{0,3}(?:-\s*){3,}$|^\s{0,3}(?:\*\s*){3,}$|^\s{0,3}(?:_\s*){3,}$")
+QUOTE_RE = re.compile(r"^\s{0,3}>\s?(?P<text>.*)$")
+BULLET_RE = re.compile(r"^(?P<indent>[ \t]*)[-*+]\s+(?P<text>.*)$")
+ORDERED_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<number>\d{1,9})[.)]\s+(?P<text>.*)$")
+
+INLINE_TOKENS = (
+    ("***", ("strong", "em")),
+    ("___", ("strong", "em")),
+    ("**", ("strong",)),
+    ("__", ("strong",)),
+    ("~~", ("strike",)),
+    ("*", ("em",)),
+    ("_", ("em",)),
+)
+ESCAPABLE = set("\\`*_~[]()#+-.!>")
+
+# A ticket is shared and clickable, so a description may only mint a link its
+# readers can trust. Any other target degrades to literal text.
+LINK_SCHEME_RE = re.compile(r"^(?:https?://|mailto:)", re.IGNORECASE)
+
+# Emphasis scanning looks ahead for a closer, so a pathological delimiter run is
+# quadratic. Real descriptions are far under this; past it, take the text as written.
+INLINE_SCAN_LIMIT = 20000
+
+# `> > > ...` recurses one level per marker. Past this, keep the text as paragraphs.
+MAX_BLOCK_DEPTH = 8
+
+# A link label recurses, and `link` is applied after the fact rather than carried in
+# `marks`, so nested links do not self-limit the way a repeated emphasis mark does.
+MAX_INLINE_DEPTH = 50
+
+
+def indent_width(value: str) -> int:
+    width = 0
+    for char in value:
+        width += 4 - (width % 4) if char == "\t" else 1
+    return width
+
+
+def starts_block(line: str) -> bool:
+    return bool(
+        FENCE_RE.match(line)
+        or RULE_RE.match(line)
+        or HEADING_RE.match(line)
+        or QUOTE_RE.match(line)
+        or BULLET_RE.match(line)
+        or ORDERED_RE.match(line)
+    )
+
+
+def text_node(value: str, marks: tuple) -> dict[str, Any]:
+    node: dict[str, Any] = {"type": "text", "text": value}
+    if marks:
+        node["marks"] = [{"type": mark} for mark in marks]
+    return node
+
+
+def find_code_close(value: str, start: int, run: int) -> int:
+    index = start
+    while index < len(value):
+        if value[index] == "`":
+            length = 1
+            while index + length < len(value) and value[index + length] == "`":
+                length += 1
+            if length == run:
+                return index
+            index += length
+            continue
+        index += 1
+    return -1
+
+
+def match_pair(value: str, start: int, opener: str, closer: str) -> int:
+    depth = 0
+    index = start
+    while index < len(value):
+        char = value[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return -1
+
+
+def emphasis_is_bounded(value: str, index: int, token: str, close: int) -> bool:
+    """`_` must sit on a word boundary, so JIRA_API_TOKEN is never read as emphasis."""
+    if token[0] != "_":
+        return True
+    before = value[index - 1] if index else ""
+    after = value[close + len(token)] if close + len(token) < len(value) else ""
+    return not before.isalnum() and not after.isalnum()
+
+
+def inline_nodes(value: str, marks: tuple = (), depth: int = 0) -> list[dict[str, Any]]:
+    if len(value) > INLINE_SCAN_LIMIT or depth > MAX_INLINE_DEPTH:
+        return [text_node(value, marks)] if value else []
+    nodes: list[dict[str, Any]] = []
+    buffer: list[str] = []
+    index = 0
+    length = len(value)
+
+    def flush() -> None:
+        if buffer:
+            nodes.append(text_node("".join(buffer), marks))
+            del buffer[:]
+
+    while index < length:
+        char = value[index]
+
+        if char == "\\" and index + 1 < length and value[index + 1] in ESCAPABLE:
+            buffer.append(value[index + 1])
+            index += 2
+            continue
+
+        if char == "`":
+            run = 1
+            while index + run < length and value[index + run] == "`":
+                run += 1
+            close = find_code_close(value, index + run, run)
+            if close != -1:
+                flush()
+                literal = value[index + run:close]
+                literal = literal.strip() or literal
+                if literal:
+                    nodes.append(text_node(literal, marks + ("code",)))
+                index = close + run
+                continue
+            buffer.append("`" * run)
+            index += run
+            continue
+
+        if char == "[" and not (index and value[index - 1] == "!"):
+            close = match_pair(value, index, "[", "]")
+            if close != -1 and close + 1 < length and value[close + 1] == "(":
+                paren = match_pair(value, close + 1, "(", ")")
+                href = value[close + 2:paren].strip() if paren != -1 else ""
+                if href and LINK_SCHEME_RE.match(href):
+                    flush()
+                    inner = inline_nodes(value[index + 1:close], marks, depth + 1) or [text_node(href, marks)]
+                    for node in inner:
+                        node.setdefault("marks", []).append(
+                            {"type": "link", "attrs": {"href": href}}
+                        )
+                    nodes.extend(inner)
+                    index = paren + 1
+                    continue
+            buffer.append(char)
+            index += 1
+            continue
+
+        opened = False
+        for token, added in INLINE_TOKENS:
+            if not value.startswith(token, index) or any(mark in marks for mark in added):
+                continue
+            close = value.find(token, index + len(token))
+            if close <= index + len(token):
+                continue
+            if not emphasis_is_bounded(value, index, token, close):
+                continue
+            flush()
+            nodes.extend(inline_nodes(value[index + len(token):close], marks + added, depth + 1))
+            index = close + len(token)
+            opened = True
+            break
+        if opened:
+            continue
+
+        buffer.append(char)
+        index += 1
+
+    flush()
+    return nodes
+
+
+def read_fence(lines: list[str], index: int, match) -> tuple[int, dict[str, Any]]:
+    marker = match.group("fence")[0]
+    closing = re.compile(r"^\s{0,3}" + re.escape(marker) + "{" + str(len(match.group("fence"))) + r",}\s*$")
+    body: list[str] = []
+    index += 1
+    while index < len(lines):
+        if closing.match(lines[index]):
+            index += 1
+            break
+        body.append(lines[index])
+        index += 1
+    node: dict[str, Any] = {"type": "codeBlock"}
+    if match.group("lang"):
+        node["attrs"] = {"language": match.group("lang")}
+    literal = "\n".join(body)
+    if literal:
+        # codeBlock content takes text nodes without marks.
+        node["content"] = [{"type": "text", "text": literal}]
+    return index, node
+
+
+def read_quote(lines: list[str], index: int, depth: int) -> tuple[int, dict[str, Any]]:
+    inner: list[str] = []
+    while index < len(lines):
+        match = QUOTE_RE.match(lines[index])
+        if match:
+            inner.append(match.group("text"))
+            index += 1
+            continue
+        if not lines[index].strip() or starts_block(lines[index]):
+            break
+        inner.append(lines[index])
+        index += 1
+    # blockquote content permits paragraph, lists, and codeBlock, but not heading.
+    content = markdown_blocks(inner, allow_headings=False, depth=depth + 1)
+    return index, {"type": "blockquote", "content": content or [{"type": "paragraph"}]}
+
+
+def collect_list_items(lines: list[str], index: int) -> tuple[list, int]:
+    items: list = []
+    total = len(lines)
+    while index < total:
+        line = lines[index]
+        if not line.strip():
+            look = index + 1
+            while look < total and not lines[look].strip():
+                look += 1
+            if look < total and (BULLET_RE.match(lines[look]) or ORDERED_RE.match(lines[look])):
+                index = look
+                continue
+            break
+        if RULE_RE.match(line) or FENCE_RE.match(line) or HEADING_RE.match(line):
+            break
+        bullet = BULLET_RE.match(line)
+        if bullet:
+            items.append([indent_width(bullet.group("indent")), False, None, [bullet.group("text")]])
+            index += 1
+            continue
+        ordered = ORDERED_RE.match(line)
+        if ordered:
+            items.append(
+                [indent_width(ordered.group("indent")), True, int(ordered.group("number")), [ordered.group("text")]]
+            )
+            index += 1
+            continue
+        if items:
+            items[-1][3].append(line.strip())
+            index += 1
+            continue
+        break
+    return items, index
+
+
+def build_list(items: list, start: int, indent: int) -> tuple[dict[str, Any], int]:
+    ordered = items[start][1]
+    node: dict[str, Any] = {"type": "orderedList" if ordered else "bulletList", "content": []}
+    if ordered and items[start][2] not in (None, 1):
+        node["attrs"] = {"order": items[start][2]}
+    index = start
+    while index < len(items):
+        item_indent, item_ordered, _number, item_lines = items[index]
+        if item_indent < indent or (item_indent == indent and item_ordered != ordered):
+            break
+        if item_indent > indent:
+            child, index = build_list(items, index, item_indent)
+            if node["content"]:
+                siblings = node["content"][-1]["content"]
+                # Uneven indent steps would otherwise stack two lists of the same kind
+                # side by side inside one item.
+                if siblings and siblings[-1].get("type") == child["type"]:
+                    siblings[-1]["content"].extend(child["content"])
+                else:
+                    siblings.append(child)
+            else:
+                node["content"].append({"type": "listItem", "content": [child]})
+            continue
         paragraph: dict[str, Any] = {"type": "paragraph"}
-        if line:
-            paragraph["content"] = [{"type": "text", "text": line}]
-        paragraphs.append(paragraph)
-    return {"type": "doc", "version": 1, "content": paragraphs}
+        content = inline_nodes(" ".join(part for part in item_lines if part))
+        if content:
+            paragraph["content"] = content
+        node["content"].append({"type": "listItem", "content": [paragraph]})
+        index += 1
+    return node, index
+
+
+def read_paragraph(lines: list[str], index: int) -> tuple[int, dict[str, Any]]:
+    collected: list[str] = []
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            break
+        if collected and starts_block(line):
+            break
+        collected.append(line.strip())
+        index += 1
+    content: list[dict[str, Any]] = []
+    for line in collected:
+        pieces = inline_nodes(line)
+        if content and pieces:
+            content.append({"type": "hardBreak"})
+        content.extend(pieces)
+    node: dict[str, Any] = {"type": "paragraph"}
+    if content:
+        node["content"] = content
+    return index, node
+
+
+def markdown_blocks(
+    lines: list[str], allow_headings: bool = True, depth: int = 0
+) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+
+        fence = FENCE_RE.match(line)
+        if fence:
+            index, node = read_fence(lines, index, fence)
+            blocks.append(node)
+            continue
+
+        if not line.strip():
+            index += 1
+            continue
+
+        if RULE_RE.match(line):
+            blocks.append({"type": "rule"})
+            index += 1
+            continue
+
+        heading = HEADING_RE.match(line)
+        if heading:
+            content = inline_nodes(heading.group("text") or "")
+            if allow_headings:
+                node = {"type": "heading", "attrs": {"level": len(heading.group("hashes"))}}
+            else:
+                node = {"type": "paragraph"}
+            if content:
+                node["content"] = content
+            blocks.append(node)
+            index += 1
+            continue
+
+        if QUOTE_RE.match(line) and depth < MAX_BLOCK_DEPTH:
+            index, node = read_quote(lines, index, depth)
+            blocks.append(node)
+            continue
+
+        if BULLET_RE.match(line) or ORDERED_RE.match(line):
+            items, index = collect_list_items(lines, index)
+            position = 0
+            while position < len(items):
+                node, position = build_list(items, position, items[position][0])
+                blocks.append(node)
+            continue
+
+        index, node = read_paragraph(lines, index)
+        blocks.append(node)
+
+    return blocks
+
+
+def markdown_to_adf(value: str) -> dict[str, Any]:
+    lines = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    content = markdown_blocks(lines)
+    return {"type": "doc", "version": 1, "content": content or [{"type": "paragraph"}]}
+
+
+def argument_text(args: argparse.Namespace, name: str) -> str | None:
+    """One of `--x`, `--x-file PATH`, or `--x -` for stdin. Never two at once.
+
+    A structured description does not survive an argv string intact, so the file and
+    stdin forms are the ones an agent should reach for.
+    """
+    flag = "--" + name.replace("_", "-")
+    inline = getattr(args, name, None)
+    from_file = getattr(args, name + "_file", None)
+
+    if from_file:
+        if inline is not None:
+            raise JiraError(f"Pass either {flag} or {flag}-file, not both.")
+        path = Path(from_file).expanduser()
+        if path.is_symlink() or not path.is_file():
+            raise JiraError(f"{flag}-file does not exist or is not a regular file: {path}")
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise JiraError(f"Could not read {flag}-file {path}: {exc}") from exc
+
+    if inline == "-":
+        if sys.stdin.isatty():
+            raise JiraError(f"{flag} - reads standard input, but nothing is piped in.")
+        return sys.stdin.read()
+
+    return inline
 
 
 def require_project_for_write(profile: Profile, project: str) -> None:
@@ -1416,12 +1953,127 @@ def epic_assignment_fields(profile: Profile, epic: str, requested_field: str | N
 
 def build_issue_fields(args: argparse.Namespace, profile: Profile) -> dict[str, Any]:
     fields: dict[str, Any] = {"summary": args.summary}
-    if args.description is not None:
-        fields["description"] = text_to_adf(args.description)
+    description = argument_text(args, "description")
+    if description is not None:
+        fields["description"] = markdown_to_adf(description)
     epic = getattr(args, "epic", None)
     if epic:
         fields.update(epic_assignment_fields(profile, epic, getattr(args, "epic_field", None)))
     return fields
+
+
+# A ticket a developer can act on states what it wants, why, and how anyone can tell it
+# is done. These are the sections each issue type must carry, with the wordings accepted
+# for each. Keep the alias lists short: a heading that passes by accident is worse than a
+# refusal that names what is missing.
+ACCEPTANCE_CRITERIA_ALIASES = ("acceptance criteria", "acceptance", "done when", "definition of done")
+STORY_SECTIONS = (
+    ("Objective", ("objective", "goal")),
+    ("Background", ("background", "context")),
+    ("Business value", ("business value", "value", "why")),
+    ("Requirements", ("requirements", "scope")),
+    ("Acceptance criteria", ACCEPTANCE_CRITERIA_ALIASES),
+    ("Open questions", ("open questions", "questions")),
+)
+BUG_SECTIONS = (
+    ("Problem", ("problem", "issue", "defect")),
+    ("Steps to reproduce", ("steps to reproduce", "reproduction", "repro", "steps")),
+    ("Expected", ("expected", "expected behavior", "expected behaviour", "expected result")),
+    ("Actual", ("actual", "actual behavior", "actual behaviour", "actual result")),
+    ("Impact", ("impact", "severity")),
+    ("Acceptance criteria", ACCEPTANCE_CRITERIA_ALIASES),
+)
+SPIKE_SECTIONS = (
+    ("Question", ("question", "research question")),
+    ("Context", ("context", "background")),
+    ("Timebox", ("timebox", "time box")),
+    ("Deliverable", ("deliverable", "deliverables", "output")),
+)
+TICKET_TEMPLATES = {
+    "story": STORY_SECTIONS,
+    "task": STORY_SECTIONS,
+    "bug": BUG_SECTIONS,
+    "spike": SPIKE_SECTIONS,
+}
+# An issue type is a free-form, site-specific string, so match a known word rather than
+# demanding an exact name. Order decides a type naming two, such as `Bug - Spike`.
+TICKET_TYPE_WORDS = (
+    ("bug", "bug"), ("defect", "bug"), ("incident", "bug"),
+    ("spike", "spike"), ("research", "spike"), ("investigation", "spike"), ("discovery", "spike"),
+    ("story", "story"), ("epic", "story"), ("feature", "story"),
+    ("task", "task"), ("subtask", "task"), ("chore", "task"), ("improvement", "task"),
+)
+
+
+def normalized_heading(value: str) -> str:
+    return " ".join(value.replace("*", "").replace("`", "").split()).strip(" :.#").lower()
+
+
+def ticket_template_for(issue_type: str) -> tuple[str, tuple]:
+    """The template an issue type calls for, or an empty one when the site names it something we do not know."""
+    words = re.findall(r"[a-z]+", issue_type.lower())
+    collapsed = "".join(words)
+    for word, template in TICKET_TYPE_WORDS:
+        if word in words or word == collapsed:
+            return template, TICKET_TEMPLATES[template]
+    return "", ()
+
+
+def document_headings(document: dict[str, Any]) -> list[str]:
+    """Top-level headings only: a section title buried in a list is not a section."""
+    return [
+        adf_inline_text(node.get("content"))
+        for node in document.get("content") or []
+        if isinstance(node, dict) and node.get("type") == "heading"
+    ]
+
+
+def validate_ticket_structure(document: dict[str, Any] | None, issue_type: str) -> None:
+    """Refuse a wall of text before it reaches Jira, naming exactly what is missing."""
+    template, sections = ticket_template_for(issue_type)
+    guidance = (
+        "Structure the description with markdown headings (see references/ticket-format.md), "
+        "or pass --freeform to send it as written."
+    )
+
+    if document is None:
+        raise JiraError(f"Refusing to create a {issue_type} with no description. {guidance}")
+
+    headings = [normalized_heading(value) for value in document_headings(document)]
+    headings = [value for value in headings if value]
+    if not headings:
+        raise JiraError(
+            f"Refusing to create a {issue_type} from a description with no headings. {guidance}"
+        )
+
+    if not sections:
+        # An unknown or localized issue type still has to clear the no-wall-of-text floor.
+        print(
+            f"note\tissue type {issue_type} is not one this catalog knows; "
+            "checked only that the description carries a heading",
+            file=sys.stderr,
+        )
+        return
+
+    missing = []
+    for name, aliases in sections:
+        if not any(
+            heading == alias or heading.startswith(alias + " ")
+            for heading in headings
+            for alias in aliases
+        ):
+            missing.append(name)
+    if missing:
+        raise JiraError(
+            f"Refusing to create a {issue_type} with an unstructured description: missing "
+            + ", ".join(missing)
+            + ". Required: "
+            + ", ".join(name for name, _ in sections)
+            + ". Found: "
+            + (", ".join(document_headings(document)) or "none")
+            + ". "
+            + guidance
+        )
 
 
 def command_create(args: argparse.Namespace, profile: Profile) -> int:
@@ -1436,6 +2088,10 @@ def command_create(args: argparse.Namespace, profile: Profile) -> int:
         "issuetype": {"name": args.issue_type},
         **build_issue_fields(args, profile),
     }
+    if getattr(args, "freeform", False):
+        print("note\tstructure check skipped by --freeform", file=sys.stderr)
+    else:
+        validate_ticket_structure(fields.get("description"), args.issue_type.strip())
     body = {"fields": fields}
 
     if not args.confirm:
@@ -1483,22 +2139,26 @@ def command_edit(args: argparse.Namespace, profile: Profile) -> int:
     if not ISSUE_KEY_RE.fullmatch(args.issue_key):
         raise JiraError(f"Invalid Jira issue key: {args.issue_key}")
     require_project_for_write(profile, args.issue_key.split("-", 1)[0])
-    if args.description is not None and args.clear_description:
+    description = argument_text(args, "description")
+    if description is not None and args.clear_description:
         raise JiraError("Pass either --description or --clear-description, not both.")
     fields: dict[str, Any] = {}
     if args.summary is not None:
         if not args.summary.strip():
             raise JiraError("Issue summary must not be empty.")
         fields["summary"] = args.summary
-    if args.description is not None:
-        fields["description"] = text_to_adf(args.description)
+    if description is not None:
+        fields["description"] = markdown_to_adf(description)
     if args.clear_description:
         fields["description"] = None
     epic = getattr(args, "epic", None)
     if epic:
         fields.update(epic_assignment_fields(profile, epic, getattr(args, "epic_field", None)))
     if not fields:
-        raise JiraError("Pass --summary, --description, --clear-description, or --epic to edit an issue.")
+        raise JiraError(
+            "Pass --summary, --description, --description-file, --clear-description, or --epic "
+            "to edit an issue."
+        )
 
     body = {"fields": fields}
     if not args.confirm:
@@ -1624,10 +2284,11 @@ def command_comment(args: argparse.Namespace, profile: Profile) -> int:
     if not ISSUE_KEY_RE.fullmatch(args.issue_key):
         raise JiraError(f"Invalid Jira issue key: {args.issue_key}")
     require_project_for_write(profile, args.issue_key.split("-", 1)[0])
-    if not args.body.strip():
-        raise JiraError("Comment body must not be empty.")
+    said = argument_text(args, "body")
+    if not said or not said.strip():
+        raise JiraError("Nothing to comment: pass --body, --body-file, or --body - for stdin.")
 
-    body = {"body": text_to_adf(args.body)}
+    body = {"body": markdown_to_adf(said)}
     if not args.confirm:
         print(
             "DRY-RUN Jira comment add | "
@@ -1635,7 +2296,7 @@ def command_comment(args: argparse.Namespace, profile: Profile) -> int:
                 [
                     f"profile={profile.name}",
                     f"issue={args.issue_key}",
-                    f"body={json.dumps(args.body, ensure_ascii=False)}",
+                    f"body={json.dumps(said, ensure_ascii=False)}",
                     "confirm=pass --confirm to add the comment",
                 ]
             )
@@ -1929,9 +2590,18 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--project", required=True, help="Configured Jira project key.")
     create.add_argument("--issue-type", required=True, help="Jira issue type name, such as Task or Bug.")
     create.add_argument("--summary", required=True, help="Issue summary.")
-    create.add_argument("--description", help="Plain-text issue description.")
+    create.add_argument(
+        "--description",
+        help="Markdown issue description. Pass `-` to read it from standard input.",
+    )
+    create.add_argument("--description-file", help="Read the markdown issue description from a file.")
     create.add_argument("--epic", help="Epic issue key to assign; Jira's Epic Link or Parent field is detected.")
     create.add_argument("--epic-field", help="Override epic field id: `parent` or `customfield_<number>`.")
+    create.add_argument(
+        "--freeform",
+        action="store_true",
+        help="Skip the ticket structure check and send the description as written.",
+    )
     create.add_argument("--confirm", action="store_true", help="Create the issue after reviewing the dry-run output.")
     create.add_argument("--json", action="store_true", help="Print the created issue reference as JSON.")
     create.set_defaults(handler=command_create)
@@ -1940,7 +2610,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_options(edit, suppress_defaults=True)
     edit.add_argument("issue_key")
     edit.add_argument("--summary", help="Replacement issue summary.")
-    edit.add_argument("--description", help="Replacement plain-text issue description.")
+    edit.add_argument(
+        "--description",
+        help="Replacement markdown description. Pass `-` to read it from standard input.",
+    )
+    edit.add_argument("--description-file", help="Read the replacement markdown description from a file.")
     edit.add_argument("--clear-description", action="store_true", help="Clear the issue description.")
     edit.add_argument("--epic", help="Epic issue key to assign; Jira's Epic Link or Parent field is detected.")
     edit.add_argument("--epic-field", help="Override epic field id: `parent` or `customfield_<number>`.")
@@ -1959,7 +2633,8 @@ def build_parser() -> argparse.ArgumentParser:
     comment = subparsers.add_parser("comment", help="Add one Jira comment. Dry-run unless --confirm is passed.")
     add_common_options(comment, suppress_defaults=True)
     comment.add_argument("issue_key")
-    comment.add_argument("--body", required=True, help="Plain-text comment body.")
+    comment.add_argument("--body", help="Markdown comment body. Pass `-` to read it from standard input.")
+    comment.add_argument("--body-file", help="Read the markdown comment body from a file.")
     comment.add_argument("--confirm", action="store_true", help="Add the comment after reviewing the dry-run output.")
     comment.add_argument("--json", action="store_true", help="Print the added comment reference as JSON.")
     comment.set_defaults(handler=command_comment)

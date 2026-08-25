@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -326,31 +327,335 @@ class JiraModuleTest(unittest.TestCase):
         self.assertEqual(captured["content_type"], "multipart/form-data; boundary=test")
         self.assertEqual(captured["token_header"], "no-check")
 
-    def test_text_to_adf_preserves_lines(self) -> None:
+    def walk_nodes(self, node):
+        """Yield every node in an ADF document, depth first."""
+        if isinstance(node, dict):
+            yield node
+            for child in node.get("content", []):
+                yield from self.walk_nodes(child)
+
+    def collect_text(self, document) -> str:
+        """Everything a reader can see, including values carried in attrs."""
+        seen = []
+        for node in self.walk_nodes(document):
+            if node.get("type") == "text":
+                seen.append(node["text"])
+            for mark in node.get("marks", []):
+                if mark.get("type") == "link":
+                    seen.append(mark["attrs"]["href"])
+        return "".join(seen)
+
+    def test_markdown_to_adf_separates_blocks_on_blank_lines(self) -> None:
         self.assertEqual(
-            self.module.text_to_adf("First line\n\nThird line"),
+            self.module.markdown_to_adf("First line\n\nThird line"),
             {
                 "type": "doc",
                 "version": 1,
                 "content": [
                     {"type": "paragraph", "content": [{"type": "text", "text": "First line"}]},
-                    {"type": "paragraph"},
                     {"type": "paragraph", "content": [{"type": "text", "text": "Third line"}]},
                 ],
             },
         )
 
+    def test_markdown_to_adf_keeps_single_newlines_as_hard_breaks(self) -> None:
+        self.assertEqual(
+            self.module.markdown_to_adf("First\nSecond")["content"],
+            [
+                {
+                    "type": "paragraph",
+                    "content": [
+                        {"type": "text", "text": "First"},
+                        {"type": "hardBreak"},
+                        {"type": "text", "text": "Second"},
+                    ],
+                }
+            ],
+        )
+
+    def test_markdown_to_adf_renders_heading_levels(self) -> None:
+        content = self.module.markdown_to_adf("# One\n\n###### Six")["content"]
+        self.assertEqual([node["type"] for node in content], ["heading", "heading"])
+        self.assertEqual([node["attrs"]["level"] for node in content], [1, 6])
+
+    def test_markdown_to_adf_leaves_a_hash_without_a_space_as_prose(self) -> None:
+        for source in ("#1234 is the ticket", "####### seven hashes"):
+            self.assertEqual(
+                self.module.markdown_to_adf(source)["content"][0]["type"], "paragraph", source
+            )
+
+    def test_markdown_to_adf_renders_a_bullet_list(self) -> None:
+        self.assertEqual(
+            self.module.markdown_to_adf("- First\n- Second")["content"],
+            [
+                {
+                    "type": "bulletList",
+                    "content": [
+                        {
+                            "type": "listItem",
+                            "content": [
+                                {"type": "paragraph", "content": [{"type": "text", "text": "First"}]}
+                            ],
+                        },
+                        {
+                            "type": "listItem",
+                            "content": [
+                                {"type": "paragraph", "content": [{"type": "text", "text": "Second"}]}
+                            ],
+                        },
+                    ],
+                }
+            ],
+        )
+
+    def test_markdown_to_adf_nests_a_list_inside_its_parent_item(self) -> None:
+        content = self.module.markdown_to_adf("- Parent\n  - Child")["content"]
+        parent_item = content[0]["content"][0]
+        self.assertEqual([node["type"] for node in parent_item["content"]], ["paragraph", "bulletList"])
+        nested = parent_item["content"][1]["content"][0]["content"][0]
+        self.assertEqual(nested["content"][0]["text"], "Child")
+
+    def test_markdown_to_adf_records_an_ordered_list_start_only_when_it_is_not_one(self) -> None:
+        self.assertNotIn("attrs", self.module.markdown_to_adf("1. One\n2. Two")["content"][0])
+        self.assertEqual(
+            self.module.markdown_to_adf("3. Three\n4. Four")["content"][0]["attrs"], {"order": 3}
+        )
+
+    def test_markdown_to_adf_starts_a_new_list_when_the_marker_kind_changes(self) -> None:
+        self.assertEqual(
+            [node["type"] for node in self.module.markdown_to_adf("- Bullet\n1. Ordered")["content"]],
+            ["bulletList", "orderedList"],
+        )
+
+    def test_markdown_to_adf_takes_fenced_code_literally(self) -> None:
+        source = "```sql\n# not a heading\n- not a list\n**not bold**\n```"
+        self.assertEqual(
+            self.module.markdown_to_adf(source)["content"],
+            [
+                {
+                    "type": "codeBlock",
+                    "attrs": {"language": "sql"},
+                    # codeBlock content takes text nodes without marks.
+                    "content": [
+                        {"type": "text", "text": "# not a heading\n- not a list\n**not bold**"}
+                    ],
+                }
+            ],
+        )
+
+    def test_markdown_to_adf_omits_the_language_when_the_fence_names_none(self) -> None:
+        self.assertNotIn("attrs", self.module.markdown_to_adf("```\nplain\n```")["content"][0])
+
+    def test_markdown_to_adf_keeps_the_body_of_an_unterminated_fence(self) -> None:
+        node = self.module.markdown_to_adf("```py\nstill mine")["content"][0]
+        self.assertEqual(node["type"], "codeBlock")
+        self.assertEqual(node["content"][0]["text"], "still mine")
+
+    def test_markdown_to_adf_renders_a_rule_and_a_blockquote(self) -> None:
+        content = self.module.markdown_to_adf("> Quoted\n\n---")["content"]
+        self.assertEqual(
+            content,
+            [
+                {
+                    "type": "blockquote",
+                    "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": "Quoted"}]}
+                    ],
+                },
+                {"type": "rule"},
+            ],
+        )
+
+    def test_markdown_to_adf_reads_spaced_dashes_as_a_rule_not_a_list(self) -> None:
+        self.assertEqual(self.module.markdown_to_adf("- - -")["content"], [{"type": "rule"}])
+
+    def test_markdown_to_adf_demotes_a_heading_inside_a_blockquote(self) -> None:
+        # blockquote content permits paragraph, lists, and codeBlock, but not heading.
+        quoted = self.module.markdown_to_adf("> # Not a heading here")["content"][0]
+        self.assertEqual([node["type"] for node in quoted["content"]], ["paragraph"])
+
+    def test_markdown_to_adf_applies_inline_marks(self) -> None:
+        content = self.module.markdown_to_adf(
+            "A **strong** and *soft* and `literal` and ~~struck~~ and [label](https://example.test/a)."
+        )["content"][0]["content"]
+        marked = {
+            node["text"]: [mark["type"] for mark in node.get("marks", [])] for node in content
+        }
+        self.assertEqual(marked["strong"], ["strong"])
+        self.assertEqual(marked["soft"], ["em"])
+        self.assertEqual(marked["literal"], ["code"])
+        self.assertEqual(marked["struck"], ["strike"])
+        self.assertEqual(marked["label"], ["link"])
+        link = [node for node in content if node["text"] == "label"][0]
+        self.assertEqual(link["marks"][0]["attrs"], {"href": "https://example.test/a"})
+
+    def test_markdown_to_adf_opens_strong_and_emphasis_together(self) -> None:
+        self.assertEqual(
+            self.module.markdown_to_adf("***both***")["content"][0]["content"],
+            [{"type": "text", "text": "both", "marks": [{"type": "strong"}, {"type": "em"}]}],
+        )
+
+    def test_markdown_to_adf_suppresses_marks_inside_a_code_span(self) -> None:
+        self.assertEqual(
+            self.module.markdown_to_adf("`**not bold**`")["content"][0]["content"],
+            [{"type": "text", "text": "**not bold**", "marks": [{"type": "code"}]}],
+        )
+
+    def test_markdown_to_adf_leaves_underscores_inside_a_word_alone(self) -> None:
+        """An identifier must survive; JIRA_API_TOKEN is not emphasis."""
+        content = self.module.markdown_to_adf("Read JIRA_API_TOKEN from file_name.py")["content"][0]
+        self.assertEqual(content["content"], [{"type": "text", "text": "Read JIRA_API_TOKEN from file_name.py"}])
+        emphasized = self.module.markdown_to_adf("a _word_ here")["content"][0]["content"]
+        self.assertEqual([node for node in emphasized if node["text"] == "word"][0]["marks"], [{"type": "em"}])
+
+    def test_markdown_to_adf_refuses_a_link_target_it_cannot_vouch_for(self) -> None:
+        """A ticket is shared and clickable, so only a trusted scheme becomes a link."""
+        for source in ("[x](javascript:alert(1))", "[x](data:text/html,hi)", "[x](/relative)"):
+            document = json.dumps(self.module.markdown_to_adf(source))
+            self.assertNotIn('"link"', document, source)
+            self.assertIn("x", document, source)
+
+    def test_markdown_to_adf_degrades_unmatched_delimiters_to_text(self) -> None:
+        for source in ("**open", "[label](", "~~struck", "`code", "*"):
+            content = self.module.markdown_to_adf(source)["content"][0]["content"]
+            self.assertEqual("".join(node["text"] for node in content), source, source)
+            self.assertNotIn("marks", content[0], source)
+
+    def test_markdown_to_adf_never_drops_visible_words(self) -> None:
+        source = (
+            "# Objective\n\nShip **it** with `care`.\n\n"
+            "## Requirements\n\n- alpha\n  - beta\n\n1. gamma\n\n"
+            "```py\ndelta = 1\n```\n\n> epsilon\n\n---\n\n[zeta](https://example.test/z)\n"
+        )
+        rendered = self.collect_text(self.module.markdown_to_adf(source))
+        for word in re.findall(r"[A-Za-z0-9]+", source):
+            if word in {"py", "1"}:  # a fence language and a list marker are syntax, not prose
+                continue
+            self.assertIn(word, rendered, word)
+
+    def test_markdown_to_adf_never_emits_an_empty_text_node(self) -> None:
+        """ADF rejects an empty text node, so no input may produce one."""
+        for source in ("", "\n\n", "   ", "#", "- ", "``", "****", "> "):
+            for node in self.walk_nodes(self.module.markdown_to_adf(source)):
+                if node.get("type") == "text":
+                    self.assertNotEqual(node["text"], "", source)
+
+    def test_markdown_to_adf_always_returns_a_document_with_content(self) -> None:
+        for source in ("", "\n\n\n", "    "):
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(document["version"], 1)
+            self.assertEqual(document["content"], [{"type": "paragraph"}], source)
+
+    def test_markdown_to_adf_bounds_deep_nesting_and_long_delimiter_runs(self) -> None:
+        deep = self.module.markdown_to_adf(">" * 200 + " bottom")
+        self.assertIn("bottom", self.collect_text(deep))
+        run = self.module.markdown_to_adf("prose " + "*" * 5000)
+        self.assertIn("prose", self.collect_text(run))
+
+    def test_adf_to_text_round_trips_a_structured_description(self) -> None:
+        """A ticket this tool writes must read back as the markdown that produced it."""
+        source = (
+            "## Objective\n\nShip **it** with `care`.\n\n"
+            "## Requirements\n\n- alpha\n  - beta\n- gamma\n\n"
+            "3. three\n4. four\n\n```py\nx = 1\n```\n\n"
+            "> note\n> more\n\n---\n\nSee [spec](https://example.test/s)."
+        )
+        self.assertEqual(self.module.adf_to_text(self.module.markdown_to_adf(source)), source)
+
+    def test_adf_to_text_keeps_a_rule_and_a_link_target(self) -> None:
+        rendered = self.module.adf_to_text(
+            self.module.markdown_to_adf("---\n\n[label](https://example.test/a)")
+        )
+        self.assertIn("---", rendered)
+        self.assertIn("https://example.test/a", rendered)
+
+    def test_adf_to_text_marks_headings_and_list_items(self) -> None:
+        rendered = self.module.adf_to_text(self.module.markdown_to_adf("# Title\n\n- one\n- two"))
+        self.assertEqual(rendered, "# Title\n\n- one\n- two")
+
+    def test_truncate_block_keeps_newlines_that_truncate_collapses(self) -> None:
+        """`detail` prints block text, so its truncation must not flatten the structure."""
+        self.assertEqual(self.module.truncate_block("a\nb"), "a\nb")
+        self.assertEqual(self.module.truncate("a\nb"), "a b")
+        self.assertEqual(self.module.truncate_block(None), "-")
+        self.assertEqual(self.module.truncate_block("abcdefghij", 8), "abcde...")
+
+    def test_markdown_to_adf_bounds_nested_link_recursion(self) -> None:
+        """A link label recurses, so nesting must be bounded or `create` dies on a stack overflow."""
+        source = "t"
+        for _ in range(1000):
+            source = "[" + source + "](https://a.test)"
+        self.assertIn("t", self.collect_text(self.module.markdown_to_adf(source)))
+
+    def test_markdown_to_adf_leaves_an_image_as_literal_text(self) -> None:
+        """Images are not supported, so the whole construct stays text rather than becoming a link."""
+        document = json.dumps(self.module.markdown_to_adf("![alt](https://example.test/i.png)"))
+        self.assertNotIn('"link"', document)
+        self.assertIn("alt", document)
+
+    def test_markdown_to_adf_merges_sub_lists_under_uneven_indent(self) -> None:
+        item = self.module.markdown_to_adf("- A\n    - B\n  - C\n- D")["content"][0]["content"][0]
+        self.assertEqual([node["type"] for node in item["content"]], ["paragraph", "bulletList"])
+
+    def test_adf_to_text_does_not_invent_spaces_around_marks(self) -> None:
+        """`foo`bar`baz` must not read back as `foo `bar` baz`."""
+        for source in ("foo`bar`baz", "word**bold**word", "a[link](https://example.test/x)b"):
+            self.assertEqual(self.module.adf_to_text(self.module.markdown_to_adf(source)), source)
+
+    def test_adf_to_text_surfaces_a_mention_or_emoji_carried_in_attrs(self) -> None:
+        """A mention holds its text in attrs; dropping it loses who was named."""
+        body = {
+            "type": "doc",
+            "content": [
+                {"type": "paragraph", "content": [
+                    {"type": "text", "text": "Hey "},
+                    {"type": "mention", "attrs": {"id": "a", "text": "@Jane Example"}},
+                    {"type": "text", "text": ", see "},
+                    {"type": "emoji", "attrs": {"shortName": ":thumbsup:"}},
+                ]}
+            ],
+        }
+        rendered = self.module.adf_to_text(body)
+        self.assertIn("@Jane Example", rendered)
+        self.assertIn(":thumbsup:", rendered)
+
+    def test_adf_to_text_surfaces_a_block_node_whose_text_is_only_in_attrs(self) -> None:
+        """A status lozenge or media title must not vanish from a ticket read-back."""
+        body = {
+            "type": "doc",
+            "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "Before"}]},
+                {"type": "mediaSingle", "attrs": {"title": "diagram.png"}},
+                {"type": "status", "attrs": {"text": "IN PROGRESS"}},
+            ],
+        }
+        rendered = self.module.adf_to_text(body)
+        self.assertIn("diagram.png", rendered)
+        self.assertIn("IN PROGRESS", rendered)
+
+    def test_clip_is_shared_by_both_truncations(self) -> None:
+        self.assertEqual(self.module.clip("abcdefghij", 8), "abcde...")
+        self.assertEqual(self.module.clip("abc", 8), "abc")
+        self.assertEqual(self.module.clip("abcdefghij", 3), "abc")
+
+    def test_every_template_shares_one_acceptance_criteria_alias_tuple(self) -> None:
+        """Two copies would let a Story and a Bug drift apart silently."""
+        story = dict(self.module.STORY_SECTIONS)["Acceptance criteria"]
+        bug = dict(self.module.BUG_SECTIONS)["Acceptance criteria"]
+        self.assertIs(story, bug)
+
     def test_create_is_dry_run_without_confirm(self) -> None:
         args = SimpleNamespace(
             project="APP",
-            issue_type="Task",
+            issue_type="Task", freeform=True,
             summary="Create this",
             description="Details",
             confirm=False,
             json=False,
         )
         output = io.StringIO()
-        with patch.object(self.module, "request", side_effect=AssertionError("live write")), redirect_stdout(output):
+        with patch.object(self.module, "request", side_effect=AssertionError("live write")), \
+                redirect_stderr(io.StringIO()), redirect_stdout(output):
             self.module.command_create(args, self.profile)
 
         self.assertIn("DRY-RUN Jira issue create", output.getvalue())
@@ -365,14 +670,15 @@ class JiraModuleTest(unittest.TestCase):
 
         args = SimpleNamespace(
             project="APP",
-            issue_type="Task",
+            issue_type="Task", freeform=True,
             summary="Create this",
             description="Details",
             confirm=True,
             json=True,
         )
         output = io.StringIO()
-        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+        with patch.object(self.module, "request", side_effect=fake_request), \
+                redirect_stderr(io.StringIO()), redirect_stdout(output):
             self.module.command_create(args, self.profile)
 
         self.assertEqual(captured["path"], "rest/api/3/issue")
@@ -395,6 +701,192 @@ class JiraModuleTest(unittest.TestCase):
                 self.module.command_create(args, self.profile)
 
         self.assertIn("outside configured project allowlist", str(error.exception))
+
+    STORY_DESCRIPTION = (
+        "## Objective\n\nRevoke a session.\n\n"
+        "## Background\n\nSupport waits for the TTL.\n\n"
+        "## Business value\n\nCuts the exposure window.\n\n"
+        "## Requirements\n\n- Add the endpoint\n\n"
+        "## Acceptance criteria\n\n- A revoked session returns 401\n\n"
+        "## Open questions\n\n- None\n"
+    )
+
+    def create_args(self, **overrides):
+        args = {
+            "project": "APP", "issue_type": "Story", "summary": "Create this",
+            "description": self.STORY_DESCRIPTION, "description_file": None,
+            "freeform": False, "confirm": False, "json": False,
+        }
+        args.update(overrides)
+        return SimpleNamespace(**args)
+
+    def run_create(self, args) -> str:
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=AssertionError("live write")), \
+                redirect_stderr(io.StringIO()), redirect_stdout(output):
+            self.module.command_create(args, self.profile)
+        return output.getvalue()
+
+    def test_ticket_template_matches_decorated_and_custom_issue_type_names(self) -> None:
+        for issue_type, expected in (
+            ("Story", "story"), ("User Story", "story"), ("Task", "task"), ("Sub-task", "task"),
+            ("Bug", "bug"), ("Defect", "bug"), ("Bug - Production", "bug"),
+            ("Spike", "spike"), ("Research", "spike"), ("Epic", "story"),
+        ):
+            self.assertEqual(self.module.ticket_template_for(issue_type)[0], expected, issue_type)
+
+    def test_ticket_template_is_empty_for_an_issue_type_we_do_not_know(self) -> None:
+        template, sections = self.module.ticket_template_for("Kundenanfrage")
+        self.assertEqual(template, "")
+        self.assertEqual(sections, ())
+
+    def test_create_accepts_a_story_with_every_required_section(self) -> None:
+        self.assertIn("DRY-RUN Jira issue create", self.run_create(self.create_args()))
+
+    def test_create_accepts_alias_section_headings(self) -> None:
+        description = (
+            "## Goal\n\nx\n\n## Context\n\nx\n\n## Why\n\nx\n\n"
+            "## Scope\n\nx\n\n## Done when\n\nx\n\n## Questions\n\nx\n"
+        )
+        self.assertIn("DRY-RUN", self.run_create(self.create_args(description=description)))
+
+    def test_create_refuses_a_description_with_no_headings(self) -> None:
+        with self.assertRaises(self.module.JiraError) as error:
+            self.run_create(self.create_args(description="Just do the thing, it is obvious."))
+        message = str(error.exception)
+        self.assertIn("no headings", message)
+        self.assertIn("--freeform", message)
+        self.assertIn("ticket-format.md", message)
+
+    def test_create_refuses_a_story_missing_required_sections(self) -> None:
+        description = "## Objective\n\nRevoke a session.\n\n## Background\n\nContext.\n"
+        with self.assertRaises(self.module.JiraError) as error:
+            self.run_create(self.create_args(description=description))
+        message = str(error.exception)
+        self.assertIn("missing Business value, Requirements, Acceptance criteria, Open questions", message)
+        self.assertIn("Found: Objective, Background", message)
+
+    def test_create_refuses_a_description_that_was_never_given(self) -> None:
+        with self.assertRaises(self.module.JiraError) as error:
+            self.run_create(self.create_args(description=None))
+        self.assertIn("no description", str(error.exception))
+        self.assertIn("DRY-RUN", self.run_create(self.create_args(description=None, freeform=True)))
+
+    def test_create_requires_the_reproduction_sections_of_a_bug(self) -> None:
+        with self.assertRaises(self.module.JiraError) as error:
+            self.run_create(self.create_args(issue_type="Bug"))
+        self.assertIn("Steps to reproduce", str(error.exception))
+
+    def test_create_requires_the_timebox_and_deliverable_of_a_spike(self) -> None:
+        with self.assertRaises(self.module.JiraError) as error:
+            self.run_create(self.create_args(issue_type="Spike"))
+        self.assertIn("Timebox", str(error.exception))
+        self.assertIn("Deliverable", str(error.exception))
+
+    def test_create_holds_an_unknown_issue_type_to_the_heading_floor(self) -> None:
+        """A site's own type still may not ship a wall of text."""
+        with self.assertRaises(self.module.JiraError):
+            self.run_create(self.create_args(issue_type="Kundenanfrage", description="wall of text"))
+        self.assertIn(
+            "DRY-RUN",
+            self.run_create(self.create_args(issue_type="Kundenanfrage", description="## Anything\n\nx")),
+        )
+
+    def test_create_refuses_a_heading_that_only_mentions_a_section_name(self) -> None:
+        description = self.STORY_DESCRIPTION.replace(
+            "## Acceptance criteria", "## Not the acceptance criteria"
+        )
+        with self.assertRaises(self.module.JiraError) as error:
+            self.run_create(self.create_args(description=description))
+        self.assertIn("Acceptance criteria", str(error.exception))
+
+    def test_create_ignores_a_section_heading_buried_in_a_list(self) -> None:
+        """A section is a top-level heading, not a line inside a bullet."""
+        description = self.STORY_DESCRIPTION.replace("## Open questions", "- ## Open questions")
+        with self.assertRaises(self.module.JiraError) as error:
+            self.run_create(self.create_args(description=description))
+        self.assertIn("Open questions", str(error.exception))
+
+    def test_freeform_skips_the_check_but_still_renders_markdown(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, **kwargs):
+            captured.update(kwargs)
+            return {"id": "10001", "key": "APP-253"}
+
+        args = self.create_args(description="# Heading", freeform=True, confirm=True, json=True)
+        with patch.object(self.module, "request", side_effect=fake_request), \
+                redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            self.module.command_create(args, self.profile)
+        heading = captured["body"]["fields"]["description"]["content"][0]
+        self.assertEqual(heading["type"], "heading")
+
+    def test_the_structure_check_runs_before_the_dry_run_is_printed(self) -> None:
+        """A clean preview followed by a refusal on --confirm is the wrong feedback order."""
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=AssertionError("live write")), \
+                redirect_stderr(io.StringIO()), redirect_stdout(output):
+            with self.assertRaises(self.module.JiraError):
+                self.module.command_create(self.create_args(description="wall of text"), self.profile)
+        self.assertNotIn("DRY-RUN", output.getvalue())
+
+    def test_edit_renders_markdown_without_a_structure_check(self) -> None:
+        """An edit is often a targeted correction, so it is not held to a template."""
+        args = SimpleNamespace(
+            issue_key="APP-252", summary=None, description="# Only a heading",
+            description_file=None, clear_description=False, confirm=False, json=False,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=AssertionError("live write")), \
+                redirect_stdout(output):
+            self.module.command_edit(args, self.profile)
+        self.assertIn('"type": "heading"', output.getvalue())
+
+    def test_freeform_says_on_stderr_that_the_check_was_skipped(self) -> None:
+        errors = io.StringIO()
+        with patch.object(self.module, "request", side_effect=AssertionError("live write")), \
+                redirect_stderr(errors), redirect_stdout(io.StringIO()):
+            self.module.command_create(
+                self.create_args(description="wall of text", freeform=True), self.profile
+            )
+        self.assertIn("structure check skipped", errors.getvalue())
+
+    def test_an_unknown_issue_type_reports_its_fallback_on_stderr(self) -> None:
+        """A skipped check has to be visible, and the references promise this line."""
+        errors = io.StringIO()
+        with patch.object(self.module, "request", side_effect=AssertionError("live write")), \
+                redirect_stderr(errors), redirect_stdout(io.StringIO()):
+            self.module.command_create(
+                self.create_args(issue_type="Kundenanfrage", description="## Anything\n\nx"),
+                self.profile,
+            )
+        self.assertIn("Kundenanfrage", errors.getvalue())
+        self.assertIn("not one this catalog knows", errors.getvalue())
+
+    def test_comment_reads_the_body_from_stdin(self) -> None:
+        args = SimpleNamespace(
+            issue_key="APP-252", body="-", body_file=None, confirm=False, json=False
+        )
+        stdin = SimpleNamespace(read=lambda: "Piped **comment**.", isatty=lambda: False)
+        output = io.StringIO()
+        with patch.object(self.module.sys, "stdin", stdin), \
+                patch.object(self.module, "request", side_effect=AssertionError("live write")), \
+                redirect_stdout(output):
+            self.module.command_comment(args, self.profile)
+        self.assertIn("Piped **comment**.", output.getvalue())
+
+    def test_edit_refuses_a_description_file_together_with_clear_description(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            page = Path(folder) / "d.md"
+            page.write_text("# Rewritten", encoding="utf-8")
+            args = SimpleNamespace(
+                issue_key="APP-252", summary=None, description=None,
+                description_file=str(page), clear_description=True, confirm=False, json=False,
+            )
+            with patch.object(self.module, "request", side_effect=AssertionError("live write")):
+                with self.assertRaises(self.module.JiraError) as error:
+                    self.module.command_edit(args, self.profile)
+        self.assertIn("--clear-description", str(error.exception))
 
     def test_edit_is_dry_run_without_confirm(self) -> None:
         args = SimpleNamespace(
@@ -549,9 +1041,91 @@ class JiraModuleTest(unittest.TestCase):
         self.assertEqual(captured["retries"], 0)
         self.assertEqual(
             captured["body"],
-            {"body": self.module.text_to_adf("Progress update")},
+            {"body": self.module.markdown_to_adf("Progress update")},
         )
         self.assertEqual(json.loads(output.getvalue())["comment_id"], "20001")
+
+    def test_create_reads_the_description_from_a_file(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            page = Path(folder) / "description.md"
+            page.write_text("## Objective\n\nShip it.\n", encoding="utf-8")
+            output = self.run_create(self.create_args(
+                issue_type="Task", freeform=True, description=None, description_file=str(page),
+            ))
+        self.assertIn('"level": 2', output)
+        self.assertIn("Objective", output)
+
+    def test_create_reads_the_description_from_stdin(self) -> None:
+        stdin = SimpleNamespace(read=lambda: "## Objective\n\nPiped.", isatty=lambda: False)
+        with patch.object(self.module.sys, "stdin", stdin):
+            output = self.run_create(self.create_args(
+                issue_type="Task", freeform=True, description="-", description_file=None,
+            ))
+        self.assertIn("Piped.", output)
+
+    def test_create_refuses_both_description_and_description_file(self) -> None:
+        args = SimpleNamespace(
+            project="APP", issue_type="Task", summary="Create this",
+            description="inline", description_file="/nonexistent.md", confirm=False, json=False,
+        )
+        with patch.object(self.module, "request", side_effect=AssertionError("live write")):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.command_create(args, self.profile)
+        self.assertIn("not both", str(error.exception))
+
+    def test_description_file_refuses_a_missing_path_or_a_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            link = Path(folder) / "link.md"
+            (Path(folder) / "real.md").write_text("x", encoding="utf-8")
+            link.symlink_to(Path(folder) / "real.md")
+            for candidate in (str(Path(folder) / "missing.md"), str(link)):
+                args = SimpleNamespace(description=None, description_file=candidate)
+                with self.assertRaises(self.module.JiraError) as error:
+                    self.module.argument_text(args, "description")
+                self.assertIn("regular file", str(error.exception), candidate)
+
+    def test_stdin_is_refused_when_nothing_is_piped_in(self) -> None:
+        args = SimpleNamespace(description="-", description_file=None)
+        with patch.object(self.module.sys, "stdin", SimpleNamespace(isatty=lambda: True)):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.argument_text(args, "description")
+        self.assertIn("nothing is piped in", str(error.exception))
+
+    def test_comment_reads_the_body_from_a_file_and_previews_the_resolved_text(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            page = Path(folder) / "body.md"
+            page.write_text("Progress **update**.", encoding="utf-8")
+            args = SimpleNamespace(
+                issue_key="APP-252", body=None, body_file=str(page), confirm=False, json=False,
+            )
+            output = io.StringIO()
+            with patch.object(self.module, "request", side_effect=AssertionError("live write")), \
+                    redirect_stdout(output):
+                self.module.command_comment(args, self.profile)
+        # The preview must show the text that will be sent, never the flag value.
+        self.assertIn("Progress **update**.", output.getvalue())
+
+    def test_comment_refuses_when_no_body_source_is_given(self) -> None:
+        args = SimpleNamespace(issue_key="APP-252", body=None, body_file=None, confirm=False, json=False)
+        with patch.object(self.module, "request", side_effect=AssertionError("live write")):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.command_comment(args, self.profile)
+        for flag in ("--body", "--body-file", "--body -"):
+            self.assertIn(flag, str(error.exception))
+
+    def test_edit_accepts_a_description_file_as_its_only_field(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            page = Path(folder) / "d.md"
+            page.write_text("# Rewritten", encoding="utf-8")
+            args = SimpleNamespace(
+                issue_key="APP-252", summary=None, description=None, description_file=str(page),
+                clear_description=False, confirm=False, json=False,
+            )
+            output = io.StringIO()
+            with patch.object(self.module, "request", side_effect=AssertionError("live write")), \
+                    redirect_stdout(output):
+                self.module.command_edit(args, self.profile)
+        self.assertIn("Rewritten", output.getvalue())
 
     def test_delete_is_dry_run_without_confirm(self) -> None:
         args = SimpleNamespace(
@@ -984,8 +1558,9 @@ class JiraModuleTest(unittest.TestCase):
             captured.update({"path": path, **kwargs})
             return {"id": "10001", "key": "APP-253"}
 
-        args = SimpleNamespace(project="APP", issue_type="Task", summary="Create this", description=None, epic="APP-10", epic_field=None, confirm=True, json=True)
-        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(io.StringIO()):
+        args = SimpleNamespace(project="APP", issue_type="Task", freeform=True, summary="Create this", description=None, epic="APP-10", epic_field=None, confirm=True, json=True)
+        with patch.object(self.module, "request", side_effect=fake_request), \
+                redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
             self.module.command_create(args, self.profile)
 
         self.assertEqual(captured["body"]["fields"]["customfield_10014"], "APP-10")
