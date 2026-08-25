@@ -169,6 +169,11 @@ Not supported: tables, panels, images, task lists, footnotes, and inline HTML. T
 literal text rather than dropped, so nothing you write is ever lost. An image written as
 `![alt](url)` stays literal text and does not become a link; attach the file with `upload` instead.
 
+Two bounds worth knowing. Lists nest eight levels deep, and a more deeply indented item is kept as
+an item of the eighth rather than nesting further. A description or comment read with
+`--description-file`, `--body-file`, or `-` is bounded to 262144 characters, and a longer body is
+refused rather than truncated.
+
 Three deliberate differences from ordinary markdown:
 
 - **A single newline becomes a line break.** Paragraphs are not reflowed, so the shape you write is
@@ -183,8 +188,12 @@ Escape a character with a backslash when you need it literally: `\*not emphasis\
 ## Reading a ticket back
 
 `jira detail APP-252 --profile example --full` re-renders the stored document as markdown, so a
-description written through this tool reads back exactly as it was written. A ticket written in
-Jira's own editor reads back with its headings, lists, code blocks, quotes, rules, and inline
-formatting intact; a construct this catalog does not render — a table, a panel, an expand — arrives
-as its text without that structure. A mention or emoji reads back as its display text. Raise
+description written through this tool reads back exactly as it was written. Text that would
+otherwise read as markup a second time — a paragraph starting with `#` or `-`, literal `*` or
+backticks in prose, whitespace or brackets inside inline code, a `]` in a link label, a fence inside
+a code block — comes back escaped, padded, or fenced wide enough that re-rendering it produces the
+same ticket. A ticket written in Jira's own editor
+reads back with its headings, lists, code blocks, quotes, rules, and inline formatting intact; a
+construct this catalog does not render — a table, a panel, an expand — arrives as its text without
+that structure. A mention or emoji reads back as its display text. Raise
 `--description-limit` when a long description is being cut short.

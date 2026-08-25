@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+import io
 import json
 import mimetypes
 import os
@@ -487,7 +488,10 @@ def request_bytes(
     raise JiraError(f"Jira attachment download exhausted retries profile={profile.name}")
 
 
-MARK_WRAPPERS = (("code", "`"), ("strike", "~~"), ("strong", "**"), ("em", "*"))
+# `code` is applied by code_span(), which sizes its own delimiter, so it is not here.
+MARK_WRAPPERS = (("strike", "~~"), ("strong", "**"), ("em", "*"))
+
+BACKTICK_RUN_RE = re.compile(r"`+")
 
 # A mention, emoji, status, or smart-link node holds no `text` child: its content is in
 # `attrs`. Reading one back must not silently drop who was named or what was flagged.
@@ -505,14 +509,51 @@ def attrs_text(node: dict[str, Any]) -> str:
     return ""
 
 
+def longest_backtick_run(value: str) -> int:
+    return max((len(run) for run in BACKTICK_RUN_RE.findall(value)), default=0)
+
+
+def code_span(value: str) -> str:
+    """Fence inline code with more backticks than it contains.
+
+    `a`b` closes on the author's own backtick and drops the rest of the span, so the
+    delimiter has to outrun the longest run inside it. A span that starts or ends with
+    whitespace or a backtick is padded, and the reader removes exactly that padding.
+    """
+    fence = "`" * (longest_backtick_run(value) + 1)
+    edge_needs_padding = bool(value) and (
+        value.startswith("`") or value.endswith("`")
+        or value[0].isspace() or value[-1].isspace()
+    )
+    # An all-space value needs no disambiguating pad, and the reader preserves it.
+    pad = " " if edge_needs_padding and value.strip(" ") else ""
+    return fence + pad + value + pad + fence
+
+
+INLINE_LITERAL_ESCAPES = frozenset("\\`*_~[]")
+
+
+def inline_literal(value: str) -> str:
+    """Escape text-node content so re-rendering does not invent inline marks."""
+    return "".join("\\" + char if char in INLINE_LITERAL_ESCAPES else char for char in value)
+
+
 def marked_text(node: dict[str, Any]) -> str:
     """Re-apply the markdown a mark stands for, so a read-back can be re-rendered."""
-    value = str(node.get("text") or "")
-    if not value:
+    literal = str(node.get("text") or "")
+    if not literal:
         return ""
     marks = {mark.get("type"): mark for mark in node.get("marks") or [] if isinstance(mark, dict)}
+    if "code" in marks:
+        value = code_span(literal)
+    else:
+        value = inline_literal(literal)
     for name, wrapper in MARK_WRAPPERS:
         if name in marks:
+            # `* ` at the start of a paragraph is a bullet before inline parsing.
+            # Use the equivalent delimiter when emphasized text begins with space.
+            if name == "em" and literal[0].isspace():
+                wrapper = "_"
             value = wrapper + value + wrapper
     link = marks.get("link")
     if link:
@@ -592,7 +633,7 @@ def adf_block_text(node: dict[str, Any], depth: int = 0) -> str:
     if node_type in ("paragraph", "heading"):
         inline = adf_inline_text(node.get("content"))
         if node_type == "paragraph":
-            return inline
+            return "\n".join(escaped_block_start(line) for line in inline.split("\n"))
         level = int((node.get("attrs") or {}).get("level") or 1)
         return ("#" * max(1, min(level, 6)) + " " + inline).rstrip()
     if node_type == "codeBlock":
@@ -602,7 +643,10 @@ def adf_block_text(node: dict[str, Any], depth: int = 0) -> str:
             for child in node.get("content") or []
             if isinstance(child, dict)
         )
-        return "```" + language + "\n" + body + "\n```"
+        # A body holding its own fence would end the block early and spill its code
+        # into the document, so the fence outruns the longest run inside.
+        fence = "`" * max(3, longest_backtick_run(body) + 1)
+        return fence + language + "\n" + body + "\n" + fence
     if node_type in ("bulletList", "orderedList"):
         return adf_list_text(node, depth)
     if node_type == "blockquote":
@@ -1531,6 +1575,11 @@ MAX_BLOCK_DEPTH = 8
 # `marks`, so nested links do not self-limit the way a repeated emphasis mark does.
 MAX_INLINE_DEPTH = 50
 
+# A sub-list recurses one level per indent step. Past this, deeper items are kept as
+# items of the deepest allowed list rather than overflowing the stack: Jira renders
+# nothing useful at that depth, and no item's text is lost.
+MAX_LIST_DEPTH = 8
+
 
 def indent_width(value: str) -> int:
     width = 0
@@ -1548,6 +1597,30 @@ def starts_block(line: str) -> bool:
         or BULLET_RE.match(line)
         or ORDERED_RE.match(line)
     )
+
+
+def escaped_block_start(line: str) -> str:
+    """Escape a line of prose that reads as a block marker.
+
+    A stored paragraph whose text is `# note` or `- note` would come back as a heading
+    or a list on the next render, so the marker is escaped and the reader unescapes it.
+    """
+    # The reader strips a paragraph line before parsing it, so the marker is judged on
+    # the stripped text: four spaces do not keep `# note` from becoming a heading.
+    stripped = line.lstrip()
+    if not starts_block(stripped):
+        return line
+    lead = line[: len(line) - len(stripped)]
+    if RULE_RE.match(stripped):
+        # A rule is nothing but its own marker repeated, so escaping only the first
+        # would leave `* * *` to come back as emphasis instead of the text it was.
+        return lead + re.sub(r"[-*_]", r"\\\g<0>", stripped)
+    ordered = ORDERED_RE.match(stripped)
+    if ordered:
+        # `\1` is not an escape the reader understands; escape the `.` or `)` instead.
+        number = ordered.group("number")
+        return lead + number + "\\" + stripped[len(number):]
+    return lead + "\\" + stripped
 
 
 def text_node(value: str, marks: tuple) -> dict[str, Any]:
@@ -1573,6 +1646,7 @@ def find_code_close(value: str, start: int, run: int) -> int:
 
 
 def match_pair(value: str, start: int, opener: str, closer: str) -> int:
+    """Find a balanced pair without treating escaped or code-span text as syntax."""
     depth = 0
     index = start
     while index < len(value):
@@ -1580,12 +1654,33 @@ def match_pair(value: str, start: int, opener: str, closer: str) -> int:
         if char == "\\":
             index += 2
             continue
+        if opener == "[" and char == "`":
+            run = 1
+            while index + run < len(value) and value[index + run] == "`":
+                run += 1
+            code_close = find_code_close(value, index + run, run)
+            if code_close != -1:
+                index = code_close + run
+                continue
         if char == opener:
             depth += 1
         elif char == closer:
             depth -= 1
             if depth == 0:
                 return index
+        index += 1
+    return -1
+
+
+def find_unescaped_token(value: str, start: int, token: str) -> int:
+    """Find a closing inline mark without selecting syntax escaped as literal text."""
+    index = start
+    while index < len(value):
+        if value[index] == "\\":
+            index += 2
+            continue
+        if value.startswith(token, index):
+            return index
         index += 1
     return -1
 
@@ -1628,9 +1723,14 @@ def inline_nodes(value: str, marks: tuple = (), depth: int = 0) -> list[dict[str
             if close != -1:
                 flush()
                 literal = value[index + run:close]
-                literal = literal.strip() or literal
+                # Remove exactly the disambiguating pad written by code_span(),
+                # never all meaningful leading or trailing whitespace.
+                if literal.startswith(" ") and literal.endswith(" ") and literal.strip(" "):
+                    literal = literal[1:-1]
                 if literal:
-                    nodes.append(text_node(literal, marks + ("code",)))
+                    # ADF allows `code` beside `link` only, so an emphasized span drops
+                    # its other marks here; the caller adds `link` after this returns.
+                    nodes.append(text_node(literal, ("code",)))
                 index = close + run
                 continue
             buffer.append("`" * run)
@@ -1660,7 +1760,7 @@ def inline_nodes(value: str, marks: tuple = (), depth: int = 0) -> list[dict[str
         for token, added in INLINE_TOKENS:
             if not value.startswith(token, index) or any(mark in marks for mark in added):
                 continue
-            close = value.find(token, index + len(token))
+            close = find_unescaped_token(value, index + len(token), token)
             if close <= index + len(token):
                 continue
             if not emphasis_is_bounded(value, index, token, close):
@@ -1753,7 +1853,7 @@ def collect_list_items(lines: list[str], index: int) -> tuple[list, int]:
     return items, index
 
 
-def build_list(items: list, start: int, indent: int) -> tuple[dict[str, Any], int]:
+def build_list(items: list, start: int, indent: int, level: int = 1) -> tuple[dict[str, Any], int]:
     ordered = items[start][1]
     node: dict[str, Any] = {"type": "orderedList" if ordered else "bulletList", "content": []}
     if ordered and items[start][2] not in (None, 1):
@@ -1763,8 +1863,8 @@ def build_list(items: list, start: int, indent: int) -> tuple[dict[str, Any], in
         item_indent, item_ordered, _number, item_lines = items[index]
         if item_indent < indent or (item_indent == indent and item_ordered != ordered):
             break
-        if item_indent > indent:
-            child, index = build_list(items, index, item_indent)
+        if item_indent > indent and level < MAX_LIST_DEPTH:
+            child, index = build_list(items, index, item_indent, level + 1)
             if node["content"]:
                 siblings = node["content"][-1]["content"]
                 # Uneven indent steps would otherwise stack two lists of the same kind
@@ -1868,11 +1968,47 @@ def markdown_to_adf(value: str) -> dict[str, Any]:
     return {"type": "doc", "version": 1, "content": content or [{"type": "paragraph"}]}
 
 
+# A description or comment is text a person or agent wrote. Anything past this is a
+# mistake or a pasted binary, and Jira rejects it long before it arrives, so the read
+# is bounded rather than pulling an arbitrary file into memory.
+MAX_BODY_CHARS = 262144
+
+
+def read_bounded_text(stream: Any, source: str) -> str:
+    """Read one character past the maximum, so an oversized body is refused, not loaded."""
+    try:
+        content = stream.read(MAX_BODY_CHARS + 1)
+    except UnicodeDecodeError as exc:
+        raise JiraError(f"{source} is not UTF-8 text.") from exc
+    except OSError as exc:
+        raise JiraError(f"Could not read {source}: {exc}") from exc
+    if len(content) > MAX_BODY_CHARS:
+        raise JiraError(
+            f"{source} is longer than the {MAX_BODY_CHARS} character maximum for a description "
+            "or comment. Shorten it, or attach the long form with upload."
+        )
+    return content
+
+
+def read_bounded_stdin(source: str) -> str:
+    """Read stdin as strict UTF-8 even when its process wrapper uses surrogateescape."""
+    raw = getattr(sys.stdin, "buffer", None)
+    if raw is None:
+        return read_bounded_text(sys.stdin, source)
+    stream = io.TextIOWrapper(raw, encoding="utf-8", errors="strict")
+    try:
+        return read_bounded_text(stream, source)
+    finally:
+        # This temporary wrapper must not close the process-owned stdin buffer.
+        stream.detach()
+
+
 def argument_text(args: argparse.Namespace, name: str) -> str | None:
     """One of `--x`, `--x-file PATH`, or `--x -` for stdin. Never two at once.
 
     A structured description does not survive an argv string intact, so the file and
-    stdin forms are the ones an agent should reach for.
+    stdin forms are the ones an agent should reach for. Both are bounded by
+    MAX_BODY_CHARS.
     """
     flag = "--" + name.replace("_", "-")
     inline = getattr(args, name, None)
@@ -1885,14 +2021,16 @@ def argument_text(args: argparse.Namespace, name: str) -> str | None:
         if path.is_symlink() or not path.is_file():
             raise JiraError(f"{flag}-file does not exist or is not a regular file: {path}")
         try:
-            return path.read_text(encoding="utf-8")
+            stream = path.open(encoding="utf-8")
         except OSError as exc:
             raise JiraError(f"Could not read {flag}-file {path}: {exc}") from exc
+        with stream:
+            return read_bounded_text(stream, f"{flag}-file {path}")
 
     if inline == "-":
         if sys.stdin.isatty():
             raise JiraError(f"{flag} - reads standard input, but nothing is piped in.")
-        return sys.stdin.read()
+        return read_bounded_stdin(f"{flag} - standard input")
 
     return inline
 

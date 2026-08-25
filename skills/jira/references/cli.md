@@ -190,18 +190,26 @@ exactly one of them per invocation:
 Passing both the inline flag and its `-file` form is refused rather than resolved by precedence.
 `--description -` refuses when standard input is a terminal, so an interactive call cannot hang.
 A literal `-` cannot be sent as a description; use `--description-file` for that.
+The file and standard-input forms read at most 262144 characters and refuse a longer body, or
+one that is not UTF-8 text, naming the flag and the maximum rather than loading the file.
 
 The text is markdown and is rendered into Atlassian Document Format: headings, bullet and numbered
 lists with nesting, fenced code blocks with a language, block quotes, horizontal rules, and inline
 strong, emphasis, code, strikethrough, and links. Anything else is left as literal text, never
-dropped. Three departures from ordinary markdown: a single newline becomes a line break, `_` does
-not emphasize inside a word so identifiers survive, and only `http`, `https`, and `mailto` link
-targets are created.
+dropped. Lists nest eight levels deep; a deeper item is kept as an item of the eighth rather than
+nesting further. Inline code inside strong, emphasis, or strikethrough is sent as code alone,
+because ADF combines the code mark with a link only. Three departures from ordinary markdown: a
+single newline becomes a line break, `_` does not emphasize inside a word so identifiers survive,
+and only `http`, `https`, and `mailto` link targets are created.
 
 `detail` and `comments` render the stored document back to markdown, so structure written through
-this command reads back as it was written. A construct this catalog does not render — a table, a
-panel, an expand — reads back as its text without that structure, and a mention or emoji reads back
-as its display text.
+this command reads back as it was written. Text that would otherwise read as markup on a second
+render — a paragraph beginning with `#` or `-`, literal `*` or backticks in prose, whitespace or
+brackets inside inline code, a `]` in a link label, a fence inside a code block — comes back
+escaped, padded, or fenced wider than the run it holds, so re-rendering it produces the same
+document. A construct this catalog does not render — a table,
+a panel, an expand — reads back as its text without that structure, and a mention or emoji reads
+back as its display text.
 
 ### Ticket Structure
 
@@ -247,6 +255,8 @@ section names, and the writing rules.
 - Create and edit are guarded mutations: they print a dry-run and require `--confirm`.
 - Create is bounded to the configured project allowlist and does not infer an issue type.
 - Create refuses an unstructured or missing description; `--freeform` sends it as written.
+- Description and comment bodies read from a file or standard input are bounded to 262144
+  characters; a longer or non-UTF-8 body is refused, never truncated or partly sent.
 - Markdown link targets are limited to `http`, `https`, and `mailto`; any other target stays
   literal text, because a ticket is shared and clickable.
 - Upload is bounded to one explicit regular file and the configured project allowlist.

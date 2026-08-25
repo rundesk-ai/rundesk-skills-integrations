@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -552,6 +553,211 @@ class JiraModuleTest(unittest.TestCase):
         run = self.module.markdown_to_adf("prose " + "*" * 5000)
         self.assertIn("prose", self.collect_text(run))
 
+    def test_markdown_to_adf_keeps_a_code_span_inside_emphasis_adf_compatible(self) -> None:
+        """ADF allows `code` beside `link` only; strong, em, or strike with it is invalid."""
+        for source, outer in (
+            ("**bold `literal` here**", "strong"),
+            ("*soft `literal` here*", "em"),
+            ("~~struck `literal` here~~", "strike"),
+            ("***both `literal` here***", "strong"),
+        ):
+            content = self.module.markdown_to_adf(source)["content"][0]["content"]
+            code = [node for node in content if node["text"] == "literal"]
+            self.assertEqual(len(code), 1, source)
+            self.assertEqual(code[0]["marks"], [{"type": "code"}], source)
+            surrounding = [
+                mark["type"] for node in content if node["text"] != "literal"
+                for mark in node.get("marks", [])
+            ]
+            self.assertIn(outer, surrounding, source)
+
+    def test_markdown_to_adf_keeps_link_on_a_code_span(self) -> None:
+        """`link` is the one mark ADF lets `code` keep, and the label is still a link."""
+        content = self.module.markdown_to_adf("[`literal`](https://example.test/a)")["content"][0]["content"]
+        self.assertEqual(
+            content,
+            [{
+                "type": "text", "text": "literal",
+                "marks": [{"type": "code"}, {"type": "link", "attrs": {"href": "https://example.test/a"}}],
+            }],
+        )
+
+    def test_create_posts_no_code_mark_combined_with_emphasis(self) -> None:
+        """The payload Jira receives is what must be valid, not only the renderer's output."""
+        captured = {}
+
+        def fake_request(profile, path, **kwargs):
+            captured.update(kwargs)
+            return {"id": "10001", "key": "APP-253"}
+
+        for source in (
+            "**bold `literal`**", "*soft `literal`*", "~~struck `literal`~~", "***both `literal`***",
+        ):
+            args = self.create_args(freeform=True, description=source, confirm=True, json=True)
+            with patch.object(self.module, "request", side_effect=fake_request), \
+                    redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+                self.module.command_create(args, self.profile)
+            posted = captured["body"]["fields"]["description"]
+            for node in self.walk_nodes(posted):
+                types = [mark["type"] for mark in node.get("marks", [])]
+                if "code" in types:
+                    self.assertEqual(types, ["code"], source)
+            self.assertIn("literal", self.collect_text(posted), source)
+
+    def test_comment_posts_no_code_mark_combined_with_emphasis(self) -> None:
+        captured = {}
+
+        def fake_request(profile, path, **kwargs):
+            captured.update(kwargs)
+            return {"id": "20001"}
+
+        for source in (
+            "**bold `literal`**", "*soft `literal`*", "~~struck `literal`~~", "***both `literal`***",
+        ):
+            args = SimpleNamespace(
+                issue_key="APP-252", body=source, body_file=None, confirm=True, json=True,
+            )
+            with patch.object(self.module, "request", side_effect=fake_request), \
+                    redirect_stdout(io.StringIO()):
+                self.module.command_comment(args, self.profile)
+            posted = captured["body"]["body"]
+            for node in self.walk_nodes(posted):
+                types = [mark["type"] for mark in node.get("marks", [])]
+                if "code" in types:
+                    self.assertEqual(types, ["code"], source)
+            self.assertIn("literal", self.collect_text(posted), source)
+
+    def stored_paragraph(self, text: str) -> dict:
+        """One paragraph exactly as Jira's own editor would store the literal text."""
+        return {
+            "type": "doc", "version": 1,
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}],
+        }
+
+    def test_adf_to_text_escapes_prose_that_would_read_back_as_a_block(self) -> None:
+        """A paragraph stored as `# note` must not return as a heading on the next render."""
+        for literal in (
+            "# not a heading", "###### not a heading", "- not a bullet", "* not a bullet",
+            "+ not a bullet", "1. not ordered", "1) not ordered", "> not a quote",
+            "```", "~~~", "---", "***", "___", "* * *", "- - -",
+        ):
+            document = self.stored_paragraph(literal)
+            rendered = self.module.adf_to_text(document)
+            self.assertEqual(self.module.markdown_to_adf(rendered), document, literal)
+
+    def test_adf_to_text_escapes_a_block_marker_a_list_item_carries(self) -> None:
+        """The escape has to survive the `- ` a list item prefixes onto it."""
+        document = {
+            "type": "doc", "version": 1,
+            "content": [{"type": "bulletList", "content": [{"type": "listItem", "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "# not a heading"}]},
+            ]}]}],
+        }
+        rendered = self.module.adf_to_text(document)
+        self.assertEqual(self.module.markdown_to_adf(rendered), document)
+
+    def test_adf_to_text_escapes_a_link_label_that_closes_early(self) -> None:
+        """`[a]b](url)` loses the link entirely, so the label's brackets are escaped."""
+        for label in ("a]b", "a[b", "[bracketed]"):
+            document = {
+                "type": "doc", "version": 1,
+                "content": [{"type": "paragraph", "content": [{
+                    "type": "text", "text": label,
+                    "marks": [{"type": "link", "attrs": {"href": "https://example.test/a"}}],
+                }]}],
+            }
+            rendered = self.module.adf_to_text(document)
+            self.assertEqual(self.module.markdown_to_adf(rendered), document, label)
+
+    def test_adf_to_text_escapes_unmarked_inline_markdown(self) -> None:
+        """Literal Jira-editor text must not gain marks when its readback is reused."""
+        for literal in (
+            "*literal*", "**literal**", "~~literal~~", "foo`bar`baz",
+            "[label](https://example.test/a)", r"already\*escaped\*", "a[b]c",
+        ):
+            document = self.stored_paragraph(literal)
+            rendered = self.module.adf_to_text(document)
+            self.assertEqual(self.module.markdown_to_adf(rendered), document, literal)
+
+    def test_adf_to_text_preserves_literal_delimiters_inside_marks(self) -> None:
+        """An escaped content delimiter must not be selected as the mark's closing token."""
+        for mark, literal in (
+            ("strong", "bold * and **"),
+            ("em", " soft * and [bracket]"),
+            ("strike", "gone ~ and ~~"),
+        ):
+            document = {
+                "type": "doc", "version": 1,
+                "content": [{"type": "paragraph", "content": [{
+                    "type": "text", "text": literal, "marks": [{"type": mark}],
+                }]}],
+            }
+            rendered = self.module.adf_to_text(document)
+            self.assertEqual(self.module.markdown_to_adf(rendered), document, mark)
+
+    def test_adf_to_text_preserves_code_span_edge_whitespace(self) -> None:
+        """The code-span pad is one space; meaningful edge whitespace must remain."""
+        for literal in (" a ", " a", "a ", "  ", "\ta", "a\t", "` a `"):
+            document = {
+                "type": "doc", "version": 1,
+                "content": [{"type": "paragraph", "content": [{
+                    "type": "text", "text": literal, "marks": [{"type": "code"}],
+                }]}],
+            }
+            rendered = self.module.adf_to_text(document)
+            self.assertEqual(self.module.markdown_to_adf(rendered), document, repr(literal))
+
+    def test_adf_to_text_preserves_special_text_in_a_code_link(self) -> None:
+        """Escapes for the link label must not become characters inside inline code."""
+        for literal in ("a]b", "a[b", r"a\b", r"a]b\c[", "`a]b`"):
+            document = {
+                "type": "doc", "version": 1,
+                "content": [{"type": "paragraph", "content": [{
+                    "type": "text", "text": literal,
+                    "marks": [
+                        {"type": "code"},
+                        {"type": "link", "attrs": {"href": "https://example.test/a"}},
+                    ],
+                }]}],
+            }
+            rendered = self.module.adf_to_text(document)
+            self.assertEqual(self.module.markdown_to_adf(rendered), document, literal)
+
+    def test_adf_to_text_fences_inline_code_past_the_backticks_it_holds(self) -> None:
+        """A single backtick closes the span early and drops the rest of the text."""
+        for literal in ("a`b", "a``b", "`x`", "``", "plain"):
+            document = {
+                "type": "doc", "version": 1,
+                "content": [{"type": "paragraph", "content": [
+                    {"type": "text", "text": literal, "marks": [{"type": "code"}]},
+                ]}],
+            }
+            rendered = self.module.adf_to_text(document)
+            self.assertEqual(self.module.markdown_to_adf(rendered), document, literal)
+
+    def test_adf_to_text_fences_a_code_block_that_contains_a_fence(self) -> None:
+        """A three-backtick fence around a body holding one spills the code into prose."""
+        for body in ("```\ninner\n```", "a\n````\nb", "x = 1"):
+            document = {
+                "type": "doc", "version": 1,
+                "content": [{
+                    "type": "codeBlock", "attrs": {"language": "py"},
+                    "content": [{"type": "text", "text": body}],
+                }],
+            }
+            rendered = self.module.adf_to_text(document)
+            self.assertEqual(self.module.markdown_to_adf(rendered), document, body)
+
+    def test_adf_to_text_round_trips_a_description_holding_its_own_delimiters(self) -> None:
+        """One document carrying every hazard at once, written and read as this tool does."""
+        source = (
+            "## Objective\n\nUse ``a`b`` and [label\\]here](https://example.test/a).\n\n"
+            "````\n```\nnested fence\n```\n````\n\n- \\# literal hash\n- plain\n"
+        )
+        document = self.module.markdown_to_adf(source)
+        rendered = self.module.adf_to_text(document)
+        self.assertEqual(self.module.markdown_to_adf(rendered), document)
+
     def test_adf_to_text_round_trips_a_structured_description(self) -> None:
         """A ticket this tool writes must read back as the markdown that produced it."""
         source = (
@@ -867,7 +1073,7 @@ class JiraModuleTest(unittest.TestCase):
         args = SimpleNamespace(
             issue_key="APP-252", body="-", body_file=None, confirm=False, json=False
         )
-        stdin = SimpleNamespace(read=lambda: "Piped **comment**.", isatty=lambda: False)
+        stdin = io.StringIO("Piped **comment**.")
         output = io.StringIO()
         with patch.object(self.module.sys, "stdin", stdin), \
                 patch.object(self.module, "request", side_effect=AssertionError("live write")), \
@@ -1056,7 +1262,7 @@ class JiraModuleTest(unittest.TestCase):
         self.assertIn("Objective", output)
 
     def test_create_reads_the_description_from_stdin(self) -> None:
-        stdin = SimpleNamespace(read=lambda: "## Objective\n\nPiped.", isatty=lambda: False)
+        stdin = io.StringIO("## Objective\n\nPiped.")
         with patch.object(self.module.sys, "stdin", stdin):
             output = self.run_create(self.create_args(
                 issue_type="Task", freeform=True, description="-", description_file=None,
@@ -1083,6 +1289,88 @@ class JiraModuleTest(unittest.TestCase):
                 with self.assertRaises(self.module.JiraError) as error:
                     self.module.argument_text(args, "description")
                 self.assertIn("regular file", str(error.exception), candidate)
+
+    def test_description_file_is_refused_past_the_body_maximum(self) -> None:
+        """An oversized file is refused with a JiraError, never read whole into memory."""
+        limit = self.module.MAX_BODY_CHARS
+        with tempfile.TemporaryDirectory() as folder:
+            page = Path(folder) / "huge.md"
+            page.write_text("x" * (limit + 1), encoding="utf-8")
+            args = SimpleNamespace(description=None, description_file=str(page))
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.argument_text(args, "description")
+            self.assertIn(str(limit), str(error.exception))
+            self.assertIn("character maximum", str(error.exception))
+
+            page.write_text("y" * limit, encoding="utf-8")
+            self.assertEqual(len(self.module.argument_text(args, "description")), limit)
+
+    def test_stdin_body_is_refused_past_the_body_maximum_after_one_bounded_read(self) -> None:
+        """The stream position proves the refusal read one character past the maximum."""
+        limit = self.module.MAX_BODY_CHARS
+        stdin = io.StringIO("z" * (limit + 4096))
+        args = SimpleNamespace(body="-", body_file=None)
+        with patch.object(self.module.sys, "stdin", stdin):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.argument_text(args, "body")
+        self.assertIn("--body - standard input", str(error.exception))
+        self.assertEqual(stdin.tell(), limit + 1)
+
+        stdin = io.StringIO("z" * limit)
+        with patch.object(self.module.sys, "stdin", stdin):
+            self.assertEqual(len(self.module.argument_text(args, "body")), limit)
+
+    def test_description_file_that_is_not_utf8_is_refused_without_a_traceback(self) -> None:
+        """A pasted binary must surface as a redacted refusal, not a UnicodeDecodeError."""
+        with tempfile.TemporaryDirectory() as folder:
+            page = Path(folder) / "binary.dat"
+            page.write_bytes(b"\xff\xfe\x00\x01")
+            args = SimpleNamespace(description=None, description_file=str(page))
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.argument_text(args, "description")
+        message = str(error.exception)
+        self.assertIn("not UTF-8 text", message)
+        self.assertNotIn("codec", message)
+
+    def test_launcher_refuses_non_utf8_stdin_without_a_preview_or_traceback(self) -> None:
+        """The real process stream may use surrogateescape, so test bytes at the launcher."""
+        launcher = MODULE_DIR.parent / "jira"
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "LC_ALL": "C",
+            "LANG": "C",
+            "JIRA_BASE_URL": "https://example.atlassian.net",
+            "JIRA_EMAIL": "alex@example.com",
+            "JIRA_API_TOKEN": "synthetic-token",
+            "JIRA_PROJECTS": "APP",
+        }
+        result = subprocess.run(
+            [str(launcher), "comment", "APP-252", "--body", "-"],
+            input=b"\xff", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, b"")
+        message = result.stderr.decode("utf-8")
+        self.assertIn("standard input is not UTF-8 text", message)
+        self.assertNotIn("Traceback", message)
+
+    def test_markdown_to_adf_bounds_nested_list_depth(self) -> None:
+        """A thousand indent steps must flatten onto the deepest list, not overflow the stack."""
+        source = "\n".join("  " * level + "- item %d" % level for level in range(1000))
+        document = self.module.markdown_to_adf(source)
+
+        def list_depth(node: dict, depth: int = 0) -> int:
+            here = depth + (1 if node.get("type") in ("bulletList", "orderedList") else 0)
+            return max([here] + [
+                list_depth(child, here) for child in node.get("content") or []
+                if isinstance(child, dict)
+            ])
+
+        self.assertEqual(list_depth(document), self.module.MAX_LIST_DEPTH)
+        rendered = self.collect_text(document)
+        for level in (0, 7, 8, 999):
+            self.assertIn("item %d" % level, rendered, level)
 
     def test_stdin_is_refused_when_nothing_is_piped_in(self) -> None:
         args = SimpleNamespace(description="-", description_file=None)
