@@ -26,12 +26,15 @@ category: providers
 - Fetch attachment metadata: `jira attachments APP-252 --profile example`
 - Dry-run one attachment download: `jira attachment --profile example --id EXAMPLE_ATTACHMENT_ID --output /tmp/example-attachment.png`
 - Confirm one attachment download: `jira attachment --profile example --id EXAMPLE_ATTACHMENT_ID --output /tmp/example-attachment.png --confirm`
-- Dry-run issue creation: `jira create --profile example --project APP --issue-type Task --summary "Example task"`
-- Confirm issue creation: `jira create --profile example --project APP --issue-type Task --summary "Example task" --confirm`
-- Dry-run issue creation with an epic: `jira create --profile example --project APP --issue-type Task --summary "Example task" --epic APP-10`
-- Confirm issue creation with an epic: `jira create --profile example --project APP --issue-type Task --summary "Example task" --epic APP-10 --confirm`
+- Dry-run issue creation: `jira create --profile example --project APP --issue-type Task --summary "Example task" --description-file /tmp/example-task.md`
+- Confirm issue creation: `jira create --profile example --project APP --issue-type Task --summary "Example task" --description-file /tmp/example-task.md --confirm`
+- Read the description from standard input: `jira create --profile example --project APP --issue-type Task --summary "Example task" --description -`
+- Create without the structure check: `jira create --profile example --project APP --issue-type Task --summary "Example task" --freeform`
+- Dry-run issue creation with an epic: `jira create --profile example --project APP --issue-type Task --summary "Example task" --description-file /tmp/example-task.md --epic APP-10`
+- Confirm issue creation with an epic: `jira create --profile example --project APP --issue-type Task --summary "Example task" --description-file /tmp/example-task.md --epic APP-10 --confirm`
 - Dry-run issue edit: `jira edit APP-252 --profile example --summary "Updated title"`
 - Confirm issue edit: `jira edit APP-252 --profile example --summary "Updated title" --confirm`
+- Replace a description from a file: `jira edit APP-252 --profile example --description-file /tmp/example-task.md --confirm`
 - Dry-run epic assignment: `jira assign-epic APP-252 --profile example --epic APP-10`
 - Confirm epic assignment: `jira assign-epic APP-252 --profile example --epic APP-10 --confirm`
 - Dry-run sprint assignment: `jira assign-sprint APP-252 --profile example --sprint-id 7`
@@ -42,6 +45,7 @@ category: providers
 - Confirm one-file upload: `jira upload APP-252 --profile example --file /tmp/example.txt --confirm`
 - Dry-run comment: `jira comment APP-252 --profile example --body "Progress update"`
 - Confirm comment: `jira comment APP-252 --profile example --body "Progress update" --confirm`
+- Comment from a file: `jira comment APP-252 --profile example --body-file /tmp/example-comment.md --confirm`
 - Dry-run issue deletion: `jira delete APP-252 --profile example`
 - Confirm issue deletion: `jira delete APP-252 --profile example --confirm`
 - Resolve issue keys from text: `jira identify 'Review APP-252' --all-profiles`
@@ -62,7 +66,8 @@ Default output is compact text for agent context. `list`, `search`, `backlog`, `
 
 Do not run `create --confirm`, `edit --confirm`, `upload --confirm`, `comment --confirm`, `delete --confirm`, or `attachment --output --confirm` as a smoke test
 unless the owner confirms the exact profile and target/effect. Offline tests cover the write request
-method, ADF description conversion, project allowlisting, multipart file upload, dry-runs, and confirmation paths.
+method, markdown-to-ADF rendering, ADF-to-markdown reading, ticket structure validation, description
+and comment input paths, project allowlisting, multipart file upload, dry-runs, and confirmation paths.
 
 ## Provider
 
@@ -87,7 +92,8 @@ For OAuth-style apps, the broad classic read scope is `read:jira-work`. Granular
 
 For create and edit, the Atlassian account also needs the Jira project permissions to create and edit
 issues in the selected project. Jira Cloud's issue APIs use `POST /rest/api/3/issue` for creation and
-`PUT /rest/api/3/issue/{issueIdOrKey}` for edits; descriptions are sent as Atlassian Document Format.
+`PUT /rest/api/3/issue/{issueIdOrKey}` for edits; descriptions are rendered from markdown into
+Atlassian Document Format before they are sent.
 The account's existing API token remains the credential. OAuth apps additionally need the Jira write
 scope documented by Atlassian.
 
@@ -170,6 +176,60 @@ attachments, comments
 
 Attachment bytes are never downloaded by `detail` or `attachments`; those commands list metadata only. `attachment --id ID --output PATH` is a dry-run by default. Add `--confirm` to download one attachment to an explicit local path. Existing paths and symlinks are rejected, and a confirmed download is published atomically without exposing a partial file or overwriting a racing target.
 
+### Description and Comment Input
+
+`create --description`, `edit --description`, and `comment --body` accept the text three ways, and
+exactly one of them per invocation:
+
+```text
+--description "<text>"        the literal text
+--description-file <path>     read it from a regular file (a symlink is refused)
+--description -               read it from standard input
+```
+
+Passing both the inline flag and its `-file` form is refused rather than resolved by precedence.
+`--description -` refuses when standard input is a terminal, so an interactive call cannot hang.
+A literal `-` cannot be sent as a description; use `--description-file` for that.
+The file and standard-input forms read at most 262144 characters and refuse a longer body, or
+one that is not UTF-8 text, naming the flag and the maximum rather than loading the file.
+
+The text is markdown and is rendered into Atlassian Document Format: headings, bullet and numbered
+lists with nesting, fenced code blocks with a language, block quotes, horizontal rules, and inline
+strong, emphasis, code, strikethrough, and links. Anything else is left as literal text, never
+dropped. Lists nest eight levels deep; a deeper item is kept as an item of the eighth rather than
+nesting further. Inline code inside strong, emphasis, or strikethrough is sent as code alone,
+because ADF combines the code mark with a link only. Three departures from ordinary markdown: a
+single newline becomes a line break, `_` does not emphasize inside a word so identifiers survive,
+and only `http`, `https`, and `mailto` link targets are created.
+
+`detail` and `comments` render the stored document back to markdown, so structure written through
+this command reads back as it was written. Text that would otherwise read as markup on a second
+render — a paragraph beginning with `#` or `-`, literal `*` or backticks in prose, whitespace or
+brackets inside inline code, a `]` in a link label, a fence inside a code block — comes back
+escaped, padded, or fenced wider than the run it holds, so re-rendering it produces the same
+document. A construct this catalog does not render — a table,
+a panel, an expand — reads back as its text without that structure, and a mention or emoji reads
+back as its display text.
+
+### Ticket Structure
+
+`create` refuses a description that has no headings, or that is missing the sections its issue type
+calls for, and the error names exactly which are absent. The check runs before the dry-run prints,
+so an unstructured ticket never previews cleanly and then fails on `--confirm`.
+
+```text
+Story, Task   Objective, Background, Business value, Requirements, Acceptance criteria, Open questions
+Bug           Problem, Steps to reproduce, Expected, Actual, Impact, Acceptance criteria
+Spike         Question, Context, Timebox, Deliverable
+```
+
+Issue types are matched by a known word, so `Bug - Production` and `User Story` both resolve. A
+type the catalog does not recognize must still carry at least one heading, but its sections are not
+checked, and the fallback is reported on stderr. `--freeform` skips the section check and still
+renders markdown. `edit` renders markdown but is not structure-checked, because an edit is often a
+targeted correction. See [Writing a Jira ticket](ticket-format.md) for the templates, the accepted
+section names, and the writing rules.
+
 ### Project Mapping Rules
 
 - The account's project list (`JIRA_PROJECTS__<ACCOUNT>`, or `JIRA_<PROFILE>_PROJECTS`, or the plain `JIRA_PROJECTS` for the default account) is the source of truth for default issue searches.
@@ -194,6 +254,11 @@ Attachment bytes are never downloaded by `detail` or `attachments`; those comman
 - Keep live checks small and bounded.
 - Create and edit are guarded mutations: they print a dry-run and require `--confirm`.
 - Create is bounded to the configured project allowlist and does not infer an issue type.
+- Create refuses an unstructured or missing description; `--freeform` sends it as written.
+- Description and comment bodies read from a file or standard input are bounded to 262144
+  characters; a longer or non-UTF-8 body is refused, never truncated or partly sent.
+- Markdown link targets are limited to `http`, `https`, and `mailto`; any other target stays
+  literal text, because a ticket is shared and clickable.
 - Upload is bounded to one explicit regular file and the configured project allowlist.
 - Comment creation and issue deletion are guarded mutations, each requiring `--confirm`.
 - Epic and sprint assignment are guarded one-issue mutations, each requiring `--confirm`; they do
@@ -203,12 +268,14 @@ Attachment bytes are never downloaded by `detail` or `attachments`; those comman
 - The integration does not transition issues, perform bulk operations, or administer projects/sites.
 
 For board discovery, Agile endpoint behavior, pagination, field compatibility, and permission
-troubleshooting, see [Agile workflows](agile.md).
+troubleshooting, see [Agile workflows](agile.md). For issue templates, section names, and the
+supported markdown, see [Writing a Jira ticket](ticket-format.md).
 
 ### Official References
 
 - [Jira issue search](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/)
 - [Jira issues](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/)
+- [Atlassian Document Format](https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/)
 - [Jira comments](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-comments/)
 - [Jira attachments](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-attachments/)
 - [Jira Software boards](https://developer.atlassian.com/cloud/jira/software/rest/api-group-board/)
