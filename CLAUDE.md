@@ -19,7 +19,8 @@ Keep these sources of truth aligned with the shipped files and behavior.
 
 ## Before you work
 
-1. Read `README.md`, `ENVIRONMENTS.md`, and `RELEASING.md` when the task touches their contracts.
+1. Read `docs/BRIEF.md` and `docs/CODEMAP.md` for what this is and where its parts are,
+   then `README.md`, `ENVIRONMENTS.md`, and `RELEASING.md` when the task touches their contracts.
    Read every `SKILL.md`, reference, script, declaration, and test you will change before editing it.
 2. Inspect the skills supplied by the runtime and load the smallest complete set that applies. Use
    `writing-skills` for `SKILL.md`, applicable runtime or testing guidance for code and tests,
@@ -42,6 +43,7 @@ Keep these sources of truth aligned with the shipped files and behavior.
 │   │   └── change-proposal.md
 │   ├── pull_request_template.md
 │   └── workflows/       CI workflows
+├── docs/                orientation: the index, BRIEF, and CODEMAP
 ├── skills/              independently installable integration packages
 ├── tests/               catalog-level structure and contract checks
 ├── AGENTS.md            agent instructions
@@ -154,7 +156,15 @@ Keep documentation true in the same change that changes behavior:
 - Change required credentials: update `rundesk.json`, the command resolver, references, and tests.
 - Change triggers, safe defaults, boundaries, or non-obvious agent guidance: update `SKILL.md` using
   `writing-skills`.
-- Change either root agent guide: make `AGENTS.md` and `CLAUDE.md` byte-identical in the same change.
+- Change either root agent guide: make `AGENTS.md` and `CLAUDE.md` byte-identical in the same change.Keep `docs/` in its layout. Only `README.md`, `BRIEF.md`, and `CODEMAP.md` sit at its root; a home is
+added when there is a page for it and never left empty. Use the `structuring-project-docs` skill
+before adding a home, moving a page, or changing the shape of one. Ecosystem root files stay at the
+repository root, where consumers and tooling look for them.
+
+Update `docs/CODEMAP.md` when a count, a layer, or a file it names changes, and `docs/BRIEF.md` only
+when the purpose, audience, or refusals actually move. Keep pages thin: lead with the fact, use a
+table wherever the content is tabular, and never restate a package's own guidance at the repository
+level.
 
 Do not duplicate detailed CLI reference material in `SKILL.md`. Keep public examples synthetic,
 reference secrets only by variable name, and use reserved domains such as `example.test`.
