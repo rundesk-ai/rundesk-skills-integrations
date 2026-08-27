@@ -22,7 +22,8 @@ declarations, and offline tests. Every skill is an independently installable run
   mutation commands.
 - `sentry` - projects, issue evidence, event inspection, and guarded resolution previews.
 - `slack-fetch` - read-only channel and direct-message discovery, bounded message history, search,
-  and complete thread reads through Slack's Web API.
+  complete thread reads, and guarded retrieval of one Slack-hosted attachment by exact file ID
+  through Slack's Web API. It has no Slack mutation commands.
 - `stripe` - balances, revenue, payouts, subscriptions, disputes, and reports, with writes limited to
   creating a report artifact.
 

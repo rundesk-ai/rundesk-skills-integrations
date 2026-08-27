@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""Fetch Slack messages and threads through read-only Web API methods."""
+"""Fetch Slack messages, threads, and hosted attachments through read-only Web API methods."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import http.client
 import json
 import os
 import re
 import sys
+import tempfile
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Optional
 
 
 API_ORIGIN = "https://slack.com"
@@ -23,6 +27,7 @@ ALLOWED_METHODS = frozenset({
     "conversations.history",
     "conversations.list",
     "conversations.replies",
+    "files.info",
     "search.messages",
 })
 DEFAULT_CONVERSATION_TYPES = ("public_channel", "private_channel", "mpim", "im")
@@ -44,10 +49,47 @@ ACCOUNT_SUFFIX_RE = re.compile(r"[A-Z0-9]+(?:_[A-Z0-9]+)*")
 RESERVED_PROFILE_WORDS = frozenset({"DEFAULT", "ENV", "PROFILES"})
 CHANNEL_RE = re.compile(r"[CDG][A-Z0-9]{8,}")
 TS_RE = re.compile(r"\d{10,}\.\d{6}")
+FILE_RE = re.compile(r"F[A-Z0-9]{8,}")
+# Slack serves private file bytes from this origin only. The bearer token is sent here and
+# to the API origin and nowhere else, so a metadata URL or redirect that leaves the set is
+# refused rather than followed.
+FILE_ORIGIN = "https://files.slack.com"
+ALLOWED_FILE_ORIGINS = frozenset({FILE_ORIGIN})
+# Only a Slack-hosted file has bytes this command may retrieve. An external, snippet, post,
+# or tombstoned file either lives outside Slack or is not the uploaded artifact.
+HOSTED_FILE_MODES = frozenset({"hosted"})
+DEFAULT_MAX_ATTACHMENT_BYTES = 26214400
+MAX_ATTACHMENT_BYTES = 104857600
+DOWNLOAD_CHUNK_BYTES = 65536
+# Named without the staged file's path: the caller owns the directory and can find it, and the
+# path is private material that does not belong in an error line.
+STAGED_RESIDUE_NOTE = (
+    "A private temporary copy may also remain in the destination "
+    "directory; remove it manually."
+)
+# Slack's own error code is exact but terse, and the scope that fixes it is not in the reply.
+FILE_ERROR_GUIDANCE = {
+    "missing_scope": (
+        "Attachment retrieval needs the files:read scope on this profile's user token; "
+        "message-only commands do not. Add files:read in the Slack app's OAuth & Permissions "
+        "page, reinstall the app, and reconfigure the profile."
+    ),
+    "not_allowed_token_type": (
+        "Attachment retrieval needs the user token this package already documents, "
+        "not a bot token."
+    ),
+    "file_not_found": "The selected profile cannot see a file with that exact ID.",
+    "file_deleted": "Slack reports this file as deleted; there are no bytes to retrieve.",
+    "access_denied": "The selected profile is not allowed to read this file.",
+}
 
 
 class SlackError(RuntimeError):
-    pass
+    """A refusal or provider failure, carrying Slack's sanitized error code when it has one."""
+
+    def __init__(self, message: str, code: str = "") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -266,7 +308,7 @@ def api_call(profile: Profile, method: str, params: dict[str, Any]) -> dict[str,
     if not payload.get("ok"):
         code = str(payload.get("error") or "unknown_error")
         safe = re.sub(r"[^a-zA-Z0-9_.-]", "_", code)[:80]
-        raise SlackError(f"Slack API refused the read: {safe}.")
+        raise SlackError(f"Slack API refused the read: {safe}.", code=safe)
     return payload
 
 
@@ -469,6 +511,245 @@ def thread_messages(profile: Profile, channel: str, ts: str, max_messages: int) 
             )
 
 
+@dataclass(frozen=True)
+class Attachment:
+    """One validated Slack-hosted file. `download_url` is private and is never printed."""
+
+    file_id: str
+    name: str
+    mimetype: str
+    size: int
+    download_url: str
+
+
+def safe_label(value: Any, limit: int = 140) -> str:
+    """Render a provider-supplied label for terminal output.
+
+    A non-printing character or a `|` in a Slack-supplied name would otherwise break or forge
+    a field in the pipe-delimited completion record a reader trusts. Every Unicode control,
+    format, surrogate, private-use, and unassigned code point goes, which covers C0, DEL, C1,
+    and the bidi and zero-width overrides that reorder or hide text in a terminal. Letters,
+    marks, punctuation, and symbols in any script are kept as they are.
+    """
+    text = "".join(
+        "/" if char == "|"
+        else " " if unicodedata.category(char).startswith("C")
+        else char
+        for char in str(value or "")
+    )
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def request_origin(value: str) -> str:
+    """Return the scheme://host[:port] of a URL, or an empty string when it has none."""
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return ""
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    if not scheme or not host:
+        return ""
+    default_port = {"https": 443, "http": 80}.get(scheme)
+    if port is None or port == default_port:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
+def validate_download_url(value: str) -> str:
+    if not value or any(char.isspace() or ord(char) < 32 for char in value):
+        raise SlackError("Slack file metadata has no usable private download URL.")
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        credentials = parsed.username or parsed.password
+    except ValueError:
+        raise SlackError("Slack returned a malformed file download URL.") from None
+    if credentials or request_origin(value) not in ALLOWED_FILE_ORIGINS:
+        raise SlackError(f"Slack returned a file download URL outside {FILE_ORIGIN}.")
+    return value
+
+
+def file_info(profile: Profile, file_id: str) -> dict[str, Any]:
+    if not FILE_RE.fullmatch(file_id):
+        raise SlackError("File must be an exact Slack file ID beginning with F.")
+    try:
+        payload = api_call(profile, "files.info", {"file": file_id})
+    except SlackError as exc:
+        guidance = FILE_ERROR_GUIDANCE.get(exc.code)
+        if guidance:
+            raise SlackError(f"{exc} {guidance}", code=exc.code) from None
+        raise
+    info = payload.get("file")
+    if not isinstance(info, dict):
+        raise SlackError("Slack returned no file object for that ID.")
+    return info
+
+
+def resolve_attachment(profile: Profile, file_id: str, max_bytes: int) -> Attachment:
+    """Validate that one exact file is visible, Slack-hosted, and within the size bound."""
+    info = file_info(profile, file_id)
+    if str(info.get("id") or "") != file_id:
+        raise SlackError("Slack returned metadata for a different file ID.")
+    access = str(info.get("file_access") or "")
+    if access != "visible":
+        raise SlackError(
+            f"Slack reports this file as {safe_label(access, 40) or 'not visible'}; "
+            "the selected profile cannot read it."
+        )
+    mode = str(info.get("mode") or "")
+    if mode not in HOSTED_FILE_MODES or info.get("is_external") or info.get("external_type"):
+        raise SlackError(
+            f"Only Slack-hosted files can be retrieved; Slack reports mode={safe_label(mode, 40) or '-'}."
+        )
+    # The MIME type is part of the completion record a caller reads to decide what arrived,
+    # so an absent, empty, or non-string one is malformed metadata rather than a blank field.
+    raw_mimetype = info.get("mimetype")
+    mimetype = safe_label(raw_mimetype, 120) if isinstance(raw_mimetype, str) else ""
+    if not mimetype:
+        raise SlackError("Slack file metadata has no usable MIME type.")
+    size = info.get("size")
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        raise SlackError("Slack file metadata has no usable byte size.")
+    if size > max_bytes:
+        raise SlackError(f"Slack file is {size} bytes, above the --max-bytes limit of {max_bytes}.")
+    url = validate_download_url(str(info.get("url_private_download") or info.get("url_private") or ""))
+    return Attachment(
+        file_id=file_id,
+        # The provider name is reported only; the destination path comes from --output, so a
+        # hostile filename can never steer the write.
+        name=safe_label(info.get("name") or info.get("title")),
+        mimetype=mimetype,
+        size=size,
+        download_url=url,
+    )
+
+
+def check_destination(output: Path) -> None:
+    if output.is_symlink() or output.exists():
+        raise SlackError(f"Refusing to overwrite existing output path: {output}")
+    if not output.parent.is_dir():
+        raise SlackError(f"Destination directory does not exist: {output.parent}")
+
+
+def response_length(response: Any) -> Optional[int]:
+    headers = getattr(response, "headers", None)
+    raw = headers.get("Content-Length") if headers is not None else None
+    try:
+        return int(str(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def remove_staged(staged: Path) -> bool:
+    """Delete the staged file, reporting whether it is gone. Never raises, never reports a lie."""
+    try:
+        staged.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
+
+
+def save_attachment(profile: Profile, attachment: Attachment, output: Path, max_bytes: int) -> tuple[int, str]:
+    """Stream one Slack-hosted file to `output`, returning its byte count and SHA-256 digest.
+
+    The bytes are staged in a mode-0600 temporary file beside the destination and published
+    with a link that fails rather than replaces, so a partial, oversized, or refused transfer
+    never becomes the destination file. Staged-file removal is attempted on every path; a removal
+    that itself fails is reported rather than suppressed, because private bytes outliving the
+    command is a fact the caller has to act on.
+    """
+    request = urllib.request.Request(
+        attachment.download_url,
+        headers={"Authorization": f"Bearer {profile.token}", "User-Agent": "rundesk-slack-fetch/1"},
+        method="GET",
+    )
+    opener = urllib.request.build_opener(SameOriginRedirectHandler())
+    digest = hashlib.sha256()
+    written = 0
+    try:
+        descriptor, name = tempfile.mkstemp(prefix=f".{output.name}.", dir=str(output.parent))
+    except OSError as exc:
+        raise SlackError(
+            f"Slack file could not be staged beside {output} ({type(exc).__name__})."
+        ) from None
+    staged = Path(name)
+    try:
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                try:
+                    with opener.open(request, timeout=120) as response:
+                        declared = response_length(response)
+                        if declared is not None and declared > max_bytes:
+                            raise SlackError(
+                                f"Slack file download is {declared} bytes, above the --max-bytes "
+                                f"limit of {max_bytes}."
+                            )
+                        while True:
+                            chunk = response.read(DOWNLOAD_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            if written > max_bytes:
+                                raise SlackError(
+                                    f"Slack file download exceeded the --max-bytes limit of {max_bytes}."
+                                )
+                            digest.update(chunk)
+                            handle.write(chunk)
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 429:
+                        retry = exc.headers.get("Retry-After", "the provider interval")
+                        raise SlackError(
+                            f"Slack rate-limited this download; retry after {retry} seconds."
+                        ) from None
+                    raise SlackError(f"Slack file download HTTP error {exc.code}.") from None
+                # A body shorter than its Content-Length surfaces as http.client.IncompleteRead,
+                # which is not an OSError, so a truncated transfer needs both families here.
+                except (OSError, http.client.HTTPException) as exc:
+                    raise SlackError(f"Slack file transfer failed ({type(exc).__name__}).") from None
+                handle.flush()
+                os.fsync(handle.fileno())
+        # Opening, flushing, syncing, and closing the staged file each fail as OSError after
+        # the transfer itself succeeded. None of them may escape as a traceback; the refusal
+        # they become is cleaned up with every other refusal below.
+        except OSError as exc:
+            raise SlackError(
+                f"Slack file could not be staged beside {output} ({type(exc).__name__})."
+            ) from None
+        if written != attachment.size:
+            raise SlackError(
+                f"Slack file download is incomplete: {written} of {attachment.size} bytes arrived."
+            )
+        try:
+            os.link(staged, output)
+        except FileExistsError:
+            raise SlackError(f"Refusing to overwrite existing output path: {output}") from None
+        except OSError as exc:
+            raise SlackError(
+                f"Slack file could not be written to {output} ({type(exc).__name__})."
+            ) from None
+    except SlackError as exc:
+        # The refusal is the important fact, but private bytes outliving it is also one, so
+        # the two are reported together rather than either being dropped.
+        if not remove_staged(staged):
+            raise SlackError(f"{exc} {STAGED_RESIDUE_NOTE}", code=exc.code) from None
+        raise
+    except BaseException:
+        # Preserve the original interruption or defect, but make any private residue visible.
+        if not remove_staged(staged):
+            print(f"WARNING: {STAGED_RESIDUE_NOTE}", file=sys.stderr)
+        raise
+    if not remove_staged(staged):
+        # The destination is already published and is never deleted to tidy up, because a
+        # racing writer may own it by now. Say what is true and exit non-zero.
+        raise SlackError(
+            f"Slack attachment was written to {output}, but its temporary copy could not be "
+            "removed from the destination directory; remove it manually."
+        )
+    return written, digest.hexdigest()
+
+
 def print_profiles(as_json: bool) -> None:
     names = configured_profile_names()
     rows = [{"profile": name, "configured": bool(profile_value(name, "SLACK_FETCH_TOKEN"))} for name in names]
@@ -623,8 +904,74 @@ def print_thread(profile: Profile, args: argparse.Namespace) -> None:
         print(f"[{index}] ts={timestamp} user={author}\n    {compact_text(item.get('text'), 2000)}")
 
 
+def print_attachment(profile: Profile, args: argparse.Namespace) -> None:
+    output = Path(args.output).expanduser()
+    check_destination(output)
+    attachment = resolve_attachment(profile, args.id, args.max_bytes)
+    record = {
+        "profile": profile.name,
+        "file_id": attachment.file_id,
+        "name": attachment.name,
+        "mimetype": attachment.mimetype,
+        "declared_bytes": attachment.size,
+        "filename": output.name,
+        "output": str(output),
+    }
+    if not args.confirm:
+        record["downloaded"] = False
+        if args.json:
+            print(json.dumps(record, indent=2))
+            return
+        print(
+            "DRY-RUN Slack attachment download | "
+            + " | ".join([
+                f"profile={profile.name}",
+                f"id={attachment.file_id}",
+                f"name={attachment.name or '-'}",
+                f"mime={attachment.mimetype}",
+                f"size={attachment.size}",
+                f"filename={output.name}",
+                f"output={output}",
+                "confirm=pass --confirm to write the file",
+            ])
+        )
+        return
+    written, digest = save_attachment(profile, attachment, output, args.max_bytes)
+    record.update({"downloaded": True, "bytes": written, "sha256": digest})
+    if args.json:
+        print(json.dumps(record, indent=2))
+        return
+    print(
+        "Slack attachment downloaded | "
+        + " | ".join([
+            f"profile={profile.name}",
+            f"id={attachment.file_id}",
+            f"name={attachment.name or '-'}",
+            f"mime={attachment.mimetype}",
+            f"bytes={written}",
+            f"sha256={digest}",
+            f"filename={output.name}",
+            f"output={output}",
+        ])
+    )
+
+
+def byte_limit(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--max-bytes must be a whole number of bytes.") from None
+    if not 1 <= parsed <= MAX_ATTACHMENT_BYTES:
+        raise argparse.ArgumentTypeError(
+            f"--max-bytes must be between 1 and {MAX_ATTACHMENT_BYTES}."
+        )
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Read-only Slack message search and thread retrieval.")
+    parser = argparse.ArgumentParser(
+        description="Read-only Slack message search, thread, and hosted-attachment retrieval."
+    )
     parser.add_argument("--env-file", help="explicit owner-only dotenv path")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -661,6 +1008,30 @@ def build_parser() -> argparse.ArgumentParser:
     thread.add_argument("--ts")
     thread.add_argument("--max-messages", type=int, default=1000, choices=range(1, 5001), metavar="1..5000")
     thread.add_argument("--json", action="store_true")
+
+    attachment = subparsers.add_parser(
+        "attachment",
+        help="download one Slack-hosted file to an explicit local path; preview unless --confirm",
+    )
+    # Retrieval writes a local file with one account's credential, so the account is never
+    # inferred here even when exactly one is configured.
+    attachment.add_argument(
+        "--profile", required=True, help="configured Slack account to retrieve the file with"
+    )
+    attachment.add_argument("--id", required=True, help="exact Slack file ID, beginning with F")
+    attachment.add_argument(
+        "--output", required=True, help="local file path to write; an existing path is never overwritten"
+    )
+    attachment.add_argument(
+        "--max-bytes",
+        type=byte_limit,
+        default=DEFAULT_MAX_ATTACHMENT_BYTES,
+        metavar=f"1..{MAX_ATTACHMENT_BYTES}",
+    )
+    attachment.add_argument(
+        "--confirm", action="store_true", help="write the file after reviewing the preview"
+    )
+    attachment.add_argument("--json", action="store_true")
     return parser
 
 
@@ -683,6 +1054,8 @@ def main(argv: list[str] | None = None) -> int:
             print_search(profile, args)
         elif args.command == "thread":
             print_thread(profile, args)
+        elif args.command == "attachment":
+            print_attachment(profile, args)
         return 0
     except SlackError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

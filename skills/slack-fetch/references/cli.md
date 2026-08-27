@@ -24,11 +24,20 @@ im:history
 mpim:history
 ```
 
+Add one further read scope only when the agent must retrieve attachment bytes:
+
+```text
+files:read
+```
+
 `search.messages` requires a user token. `conversations.list` uses the matching `:read` scopes;
 `conversations.history` and `conversations.replies` use the matching history scope for each
-conversation type. A token can read only content the Slack user and workspace policy allow. Omit
-read and history scopes for conversation types that must remain inaccessible. Do not add
-`chat:write`, `reactions:write`, `channels:manage`, or another mutation scope.
+conversation type. `files.info` and the authenticated download behind `attachment` use
+`files:read`, which is optional: a profile without it keeps every message command and refuses
+`attachment` with the scope name and this setup step. A token can read only content the Slack user
+and workspace policy allow. Omit read and history scopes for conversation types that must remain
+inaccessible. Do not add `files:write`, `chat:write`, `reactions:write`, `channels:manage`, or
+another mutation scope.
 
 The command also accepts the established local profile shape
 `SLACK_<PROFILE>_TOKEN`, `SLACK_<PROFILE>_LABEL`, `SLACK_<PROFILE>_TYPES`, and
@@ -60,6 +69,8 @@ slack-fetch messages --profile <profile> --channel D00000000 --oldest 1700000000
 slack-fetch search --profile <profile> --query 'release in:#example after:2026-01-01' --limit 10
 slack-fetch thread --profile <profile> --permalink 'https://example.slack.com/archives/C00000000/p1700000000000000'
 slack-fetch thread --profile <profile> --channel C00000000 --ts 1700000000.000000
+slack-fetch attachment --profile <profile> --id F00000000 --output /tmp/example.docx
+slack-fetch attachment --profile <profile> --id F00000000 --output /tmp/example.docx --confirm
 ```
 
 `channels` returns at most `--limit` accessible public channels, private channels, group DMs, and
@@ -77,6 +88,37 @@ the cap exits non-zero and labels the output incomplete. Slack may apply a low r
 rate-limited page exits non-zero with the provider's non-secret retry interval, so the result must
 not be called complete.
 
+`attachment` retrieves one Slack-hosted file by its exact `--id` and writes it to the explicit
+`--output` path. Alone among the commands it requires `--profile`, because it spends one account's
+credential on a local write and never infers the account, even when only one is configured.
+It is a preview until `--confirm` is passed: the preview resolves current metadata
+through `files.info` and prints the file ID, name, MIME type, declared byte size, and destination
+without writing anything. `--confirm` streams the file from Slack's private file origin with the
+profile's token, stages it beside the destination in an owner-only temporary file, and publishes it
+only after the transfer is whole. The completion record names the file ID, destination, final
+filename, MIME type, byte count, and SHA-256 digest; `--json` prints the same fields as an object.
+`--max-bytes` defaults to 26,214,400 (25 MiB) and may be raised to 104,857,600 (100 MiB).
+
+The command refuses, with a non-zero exit and no secret material, when: no `--profile` is given; the
+file ID is not an exact Slack ID; the profile's token lacks `files:read`; Slack reports the file as
+missing, deleted, access-denied, or not visible; the metadata is malformed, names a different file,
+or has no usable size or MIME type; the file is stored outside Slack rather than hosted by it; the
+declared size or the transfer exceeds `--max-bytes`; fewer bytes arrive than Slack declared; the
+download URL is not on `https://files.slack.com`; a redirect would leave that origin; the destination
+exists, is a symlink, or its directory does not; the staged file cannot be written, flushed, synced,
+or removed after use; or Slack returns an HTTP error. A refused or partial transfer never becomes
+the destination file.
+
+Staged-file removal is attempted on every path. In the rare case that removal itself fails — a
+directory that has become read-only or full, for instance — the command does not hide it: it exits
+non-zero with one line saying whether the attachment was written and that a temporary copy may remain
+in the destination directory, and it preserves the original refusal's own wording when there was one.
+An interruption or unexpected defect remains the original failure and emits a separate redacted warning
+when cleanup also fails.
+It never prints the temporary file's path and never deletes the destination to tidy up, because
+another writer may own that path by then. Remove the leftover copy manually; it holds the same
+private bytes as the file it was staging.
+
 Default text output is compact for agent context and includes each message timestamp, author ID,
 and bounded text. `--json` preserves the complete channel or message objects returned by Slack and
 is only for an explicitly requested structured consumer. Never redirect live output to routine
@@ -84,9 +126,18 @@ logs or use it as a test fixture.
 
 ## Boundaries and limitations
 
-- There are no send, reply, react, edit, delete, save, pin, mark-read, membership, or administration
-  commands. The HTTP allowlist contains only `auth.test`, `conversations.list`,
-  `conversations.history`, `search.messages`, and `conversations.replies`.
+- There are no send, reply, react, edit, delete, save, pin, mark-read, membership, upload, share, or
+  administration commands. The HTTP allowlist contains only `auth.test`, `conversations.list`,
+  `conversations.history`, `search.messages`, `conversations.replies`, and `files.info`. The only
+  other request the command makes is the authenticated GET of a Slack-hosted file on
+  `https://files.slack.com`, and the authorization header is sent to those two origins alone.
+- `attachment` changes nothing in Slack. Its one effect is creating the local file named by
+  `--output`, which is why it previews first and writes only with `--confirm`. It cannot list, search,
+  export, or back up files, upload one, or change a file's sharing or visibility; retrieval takes one
+  exact file ID that a message or search result already disclosed.
+- A file Slack does not host itself — an external link, snippet, post, or tombstoned entry — has no
+  retrievable bytes and is refused. Retrieval is bounded by `--max-bytes`, so a large file is refused
+  rather than streamed.
 - Slack retention, Enterprise policies, search exclusions, token scopes, and the user's existing
   access determine what can be found. The command does not bypass them.
 - Search relevance is Slack's result ordering. Narrow with quoted phrases and `in:`, `from:`,
@@ -96,8 +147,9 @@ logs or use it as a test fixture.
   documented user-token method with the narrow `search:read` scope.
 - A long thread can be interrupted by Slack's rate limit. Partial output is explicitly incomplete
   and must not be summarized as a complete thread.
-- The command resolves no display names and downloads no files. IDs and message text are returned
-  exactly as the read endpoints provide them, with text bounded in compact output.
+- The command resolves no display names. IDs and message text are returned exactly as the read
+  endpoints provide them, with text bounded in compact output. A file's bytes are downloaded only by
+  `attachment`, only for one named file, and only to the path the request names.
 - The local Slack app and an authenticated Chrome session are not prerequisites and are never
   inspected. macOS Full Disk Access, Keychain access, Accessibility, and Screen Recording are not
   requested or bypassed.
@@ -113,27 +165,28 @@ python3 "$RUNDESK_SKILLS/slack-fetch/scripts/slack-fetch.d/test-slack-fetch.py" 
 The offline suite uses synthetic API responses and patches every HTTP boundary. It checks the local
 profile shape, channel and DM listing, bounded timestamped message history, full JSON, searches,
 reply-to-root selection, complete pagination, cap refusal, rate-limit errors, URL encoding,
-credential redaction, and the endpoint allowlist without real workspaces or messages.
+credential redaction, and the endpoint allowlist without real workspaces or messages. For
+`attachment` it also covers the required profile, the preview, a confirmed write verified by byte
+count and SHA-256, the missing-scope message, inaccessible and malformed metadata including the MIME
+type, hosted and non-hosted modes, the size bound, a partial transfer, a failed staged write, flush,
+sync, and close, a failed staged cleanup after both publication and refusal, overwrite and symlink
+refusal, approved and unapproved download origins and redirects, HTTP failures, non-printing Unicode
+in provider-supplied names, and the absence of the token, authorization header, private URL, and
+staged path from every output path.
 
 Optional live checks should remain metadata-only until the owner approves content access:
 
 ```sh
 slack-fetch status --profile <profile>
+slack-fetch attachment --profile <profile> --id F00000000 --output /tmp/example.docx
 ```
+
+The `attachment` preview reads metadata and writes nothing, so it is the metadata-only live check
+for retrieval. A live write check needs a non-sensitive test attachment the owner nominates;
+compare the reported byte count and SHA-256 against the source file.
 
 ## Sources
 
-- [Slack search help](https://slack.com/help/articles/202528808-How-to-search-in-Slack) documents
-  search modifiers and the browser/desktop search surface.
-- [Slack `search.messages`](https://api.slack.com/methods/search.messages) documents the
-  credentialed message-search method.
-- [Slack `conversations.list`](https://api.slack.com/methods/conversations.list) documents
-  conversation types, read scopes, and cursor pagination.
-- [Slack `conversations.history`](https://api.slack.com/methods/conversations.history) documents
-  bounded channel and DM history with Slack timestamps.
-- [Slack `conversations.replies`](https://api.slack.com/methods/conversations.replies) documents
-  cursor pagination, history scopes by conversation type, and current rate-limit constraints.
-- [Slack deep linking](https://docs.slack.dev/interactivity/deep-linking/) documents supported
-  desktop URI targets; it does not define a local message-history or desktop-cache API.
-- [Slack system requirements](https://slack.com/help/articles/115002037526-System-requirements-for-using-Slack.)
-  documents supported macOS and browser clients.
+Slack's own documentation for every surface this command uses or declines is in
+[sources.md](./sources.md). Read it before changing or challenging a claim about Slack's methods,
+scopes, pagination, or limits.
