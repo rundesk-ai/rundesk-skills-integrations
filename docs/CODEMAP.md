@@ -6,7 +6,7 @@ the tree moves on without this page.
 Every package is a directory under `skills/` holding a `SKILL.md`, the references it loads on
 demand, and the one command it ships under `scripts/`. Nothing else in the repository is large.
 
-## Packages (skills/ — 11, 14 reference files)
+## Packages (skills/ — 11, 15 reference files)
 
 Each holds `SKILL.md` for routing and core procedure, and `references/` for detail loaded on demand.
 `references/sources.md` is required in every touched package.
@@ -22,7 +22,7 @@ Each holds `SKILL.md` for routing and core procedure, and `references/` for deta
 | `monarch` | 2 | yes |
 | `posthog` | 1 | yes |
 | `sentry` | 1 | yes |
-| `slack-fetch` | 1 | yes |
+| `slack-fetch` | 2 | yes |
 | `stripe` | 1 | yes |
 
 11 of 11 packages ship a command under `scripts/`. The rest are guidance only.
@@ -31,7 +31,7 @@ Each holds `SKILL.md` for routing and core procedure, and `references/` for deta
 
 | File | What it is |
 |---|---|
-| `manifest.json` | schema, name, version (`0.12.0`), and description |
+| `manifest.json` | schema, name, version (`0.13.0`), and description |
 | `README.md` | the consumer contract: what the catalog is, how to install it, and every package |
 | `ENVIRONMENTS.md` | the runtime, configuration, and credential contract every package obeys |
 | `AGENTS.md`, `CLAUDE.md` | the repository guide, byte-identical by contract |
