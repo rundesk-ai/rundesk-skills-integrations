@@ -278,9 +278,10 @@ is a real mention. Past the limit that scan is exactly what cannot be run, so th
 refused, though a short line writes each of them as literal text.
 
 Split the paragraph so the mention sits in a shorter line, or escape it as `@\[Name]` — an escaped
-opener holds no `@[`, so it stays literal at any length. The refusal quotes at most 60 characters of
-the candidate and nothing else from the line, and it happens before the user search, so no oversized
-body reaches Jira.
+opener holds no `@[`, so it stays literal at any length. The refusal is fixed text: it names the
+syntax and the limit, and quotes nothing from the line, because a description or comment is where a
+pasted token or header would sit. It happens before the user search, so no oversized body reaches
+Jira either.
 
 `detail` and `comments` render a stored mention as its display text (`@Alex Example`), not as the
 `@[...]` syntax, so a read-back that is re-sent sends plain text rather than mentioning anyone

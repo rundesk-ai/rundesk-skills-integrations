@@ -1575,8 +1575,10 @@ class JiraModuleTest(unittest.TestCase):
 
         message = str(error.exception)
         self.assertIn(str(self.module.INLINE_SCAN_LIMIT), message)
-        self.assertIn("@[Alex Example]", message)
+        self.assertIn(self.module.MENTION_SYNTAX, message)
         self.assertIn("Split the paragraph", message)
+        # The fixed syntax, not the name the caller happened to write.
+        self.assertNotIn("Alex Example", message)
 
     def test_the_scan_limit_boundary_resolves_at_the_limit_and_refuses_one_past_it(self) -> None:
         limit = self.module.INLINE_SCAN_LIMIT
@@ -1679,15 +1681,50 @@ class JiraModuleTest(unittest.TestCase):
             self.assertEqual(calls, [], f"confirm={confirm}")
             self.assertEqual(output.getvalue(), "", f"confirm={confirm}")
 
-    def test_an_oversized_mention_refusal_stays_bounded_and_quotes_only_the_name(self) -> None:
-        """The refusal must not echo the oversized body back into the log."""
-        with self.assertRaises(self.module.JiraError) as error:
-            self.module.markdown_to_adf(self.oversized("@[" + ("A" * 300) + "]"))
+    # Suffixes shaped like the material a body should never put on a terminal. The
+    # values are synthetic; what matters is that none of them can reach any stream.
+    SECRET_SHAPED_SUFFIXES = (
+        ("JIRA_API_TOKEN=synthetic-secret", "synthetic-secret"),
+        ("token=synthetic-bearer-value", "synthetic-bearer-value"),
+        ("password=synthetic-pw", "synthetic-pw"),
+        ("authorization: Basic c3ludGhldGlj", "c3ludGhldGlj"),
+        ("cookie=session=synthetic-cookie", "synthetic-cookie"),
+        ("@[" + ("A" * 300) + "]", "A" * 300),
+    )
 
-        message = str(error.exception)
-        self.assertLess(len(message), 500)
-        self.assertNotIn("A" * 300, message)
-        self.assertNotIn("x" * 100, message)
+    def test_the_over_limit_refusal_emits_nothing_drawn_from_the_body(self) -> None:
+        """A body holds whatever was pasted into it, so none of it may be quoted back.
+
+        The refusal used to echo a window of the line after `@[`, which put an
+        adjacent token or header straight onto stderr.
+        """
+        for suffix, forbidden in self.SECRET_SHAPED_SUFFIXES:
+            with self.subTest(suffix=suffix):
+                body = self.oversized("@[Alex Example] " + suffix)
+                args = self.comment_args(body=body, confirm=True)
+                out, err = io.StringIO(), io.StringIO()
+                with patch.object(
+                    self.module, "request", side_effect=AssertionError("live call")
+                ), redirect_stdout(out), redirect_stderr(err):
+                    with self.assertRaises(self.module.JiraError) as error:
+                        self.module.command_comment(args, self.profile)
+
+                for stream in (str(error.exception), out.getvalue(), err.getvalue()):
+                    self.assertNotIn(forbidden, stream)
+                    self.assertNotIn("xxxxxxxxxx", stream)
+
+    def test_the_over_limit_refusal_is_fixed_text_of_a_bounded_length(self) -> None:
+        """Every refusal is the same sentence, so its size cannot follow the body."""
+        messages = set()
+        for suffix, _ in self.SECRET_SHAPED_SUFFIXES:
+            for pad in (1, 5000):
+                value = ("x" * (self.module.INLINE_SCAN_LIMIT + pad)) + " @[Alex] " + suffix
+                with self.assertRaises(self.module.JiraError) as error:
+                    self.module.markdown_to_adf(value)
+                messages.add(str(error.exception))
+
+        self.assertEqual(len(messages), 1, "the refusal varies with the body")
+        self.assertLess(len(messages.pop()), 500)
 
     def test_a_link_label_past_the_depth_bound_reserves_rather_than_refuses(self) -> None:
         """Link labels already keep the syntax literal, so the bound must not refuse there."""

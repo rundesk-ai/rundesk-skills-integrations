@@ -1598,10 +1598,6 @@ MENTION_SYNTAX = "@[Display Name]"
 # pair, so escaping still keeps the syntax literal without any scanning at all.
 MENTION_SYNTAX_OPENER = "@["
 
-# How much of an apparent mention the refusal may quote back, so a long name or a
-# pasted body cannot reach the log through the error message.
-MENTION_SYNTAX_ECHO = 60
-
 
 def indent_width(value: str) -> int:
     width = 0
@@ -1730,16 +1726,17 @@ def inline_nodes(
         # never tells. A link or image label is the one place the syntax is already
         # reserved as literal, so only the contexts that would have resolved it refuse.
         if not in_link_label and not in_image_label:
-            at = value.find(MENTION_SYNTAX_OPENER)
-            if at != -1:
-                candidate = clip(value[at:at + MENTION_SYNTAX_ECHO], MENTION_SYNTAX_ECHO)
+            # The refusal says only what is fixed here. Quoting the candidate back would
+            # put a window of the body on stderr, and a body is where a pasted token,
+            # header, or cookie sits; the author already knows what they wrote.
+            if MENTION_SYNTAX_OPENER in value:
                 raise JiraError(
-                    f"Apparent {MENTION_SYNTAX} syntax at {candidate} sits in an inline segment "
-                    f"longer than the {INLINE_SCAN_LIMIT} character scan limit, where mentions "
-                    "are not resolved. Refusing to send it as text that names someone Jira never "
+                    f"Apparent {MENTION_SYNTAX} syntax sits in an inline segment longer than "
+                    f"the {INLINE_SCAN_LIMIT} character scan limit, where mentions are not "
+                    "resolved. Refusing to send it as text that names someone Jira never "
                     "notifies. Split the paragraph so the mention sits in a shorter line, or "
-                    "escape it as `@\\[Name]`. Every `@[` is refused here: telling a mention from "
-                    "literal text needs the scan this limit rules out."
+                    f"escape it as `@\\[Name]`. Every `{MENTION_SYNTAX_OPENER}` is refused here: "
+                    "telling a mention from literal text needs the scan this limit rules out."
                 )
         return [text_node(value, marks)] if value else []
     nodes: list[dict[str, Any]] = []
