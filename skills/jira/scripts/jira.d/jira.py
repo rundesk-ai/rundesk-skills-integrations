@@ -1589,6 +1589,11 @@ MAX_LIST_DEPTH = 8
 MENTION_REQUEST_TYPE = "mentionRequest"
 MENTION_SYNTAX = "@[Display Name]"
 
+# Matches what the writer below would take as a mention request. `@\[Name]` does not
+# match, because the writer does not read that as one either. Searching is linear and
+# parses nothing, so it stays inside the bound it is used to police.
+MENTION_SYNTAX_RE = re.compile(r"@\[[^\[\]\n]+\]")
+
 
 def indent_width(value: str) -> int:
     width = 0
@@ -1711,6 +1716,22 @@ def inline_nodes(
     in_image_label: bool = False,
 ) -> list[dict[str, Any]]:
     if len(value) > INLINE_SCAN_LIMIT or depth > MAX_INLINE_DEPTH:
+        # Past the bound this segment is handed back as written, which is right for
+        # prose and wrong for a mention: `@[Display Name]` asks for someone to be
+        # notified, and writing it as text posts a comment that names a person Jira
+        # never tells. A link or image label is the one place the syntax is already
+        # reserved as literal, so only the contexts that would have resolved it refuse.
+        if not in_link_label and not in_image_label:
+            found = MENTION_SYNTAX_RE.search(value)
+            if found:
+                raise JiraError(
+                    f"{MENTION_SYNTAX} appears in an inline segment longer than the "
+                    f"{INLINE_SCAN_LIMIT} character scan limit, where mentions are not "
+                    f"resolved. Refusing to send {clip(found.group(0), 80)} as plain text, "
+                    "which would name someone Jira never notifies. Split the paragraph so "
+                    "the mention sits in a shorter line, or escape it as `@\\[Name]` to "
+                    "keep it literal."
+                )
         return [text_node(value, marks)] if value else []
     nodes: list[dict[str, Any]] = []
     buffer: list[str] = []

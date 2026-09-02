@@ -1563,6 +1563,80 @@ class JiraModuleTest(unittest.TestCase):
         self.assertNotIn("mention", json.loads(output.getvalue()))
         self.assertNotIn("mentionRequest", json.dumps(calls[0]["body"]))
 
+    def oversized(self, tail: str) -> str:
+        """One inline segment one character past the writer's scan limit."""
+        return ("x" * (self.module.INLINE_SCAN_LIMIT + 1)) + " " + tail
+
+    def test_a_mention_past_the_inline_scan_limit_refuses_instead_of_writing_text(self) -> None:
+        """Past the bound the writer returns raw text; a mention there notifies nobody."""
+        with self.assertRaises(self.module.JiraError) as error:
+            self.module.markdown_to_adf(self.oversized("@[Alex Example]"))
+
+        message = str(error.exception)
+        self.assertIn(str(self.module.INLINE_SCAN_LIMIT), message)
+        self.assertIn("@[Alex Example]", message)
+        self.assertIn("Split the paragraph", message)
+
+    def test_the_scan_limit_boundary_resolves_at_the_limit_and_refuses_one_past_it(self) -> None:
+        limit = self.module.INLINE_SCAN_LIMIT
+        mention = "@[Alex Example] "
+        at_limit = mention + ("x" * (limit - len(mention)))
+        self.assertEqual(len(at_limit), limit)
+        self.assertEqual(
+            self.module.collect_mention_requests(self.module.markdown_to_adf(at_limit)),
+            ["Alex Example"],
+        )
+
+        just_over = mention + ("x" * (limit - len(mention) + 1))
+        self.assertEqual(len(just_over), limit + 1)
+        with self.assertRaises(self.module.JiraError):
+            self.module.markdown_to_adf(just_over)
+
+    def test_oversized_text_without_a_mention_keeps_its_bounded_fallback(self) -> None:
+        """Only apparent mention syntax refuses; ordinary long prose is still accepted."""
+        for tail in ("no mention here", "@Alex Example plain", "mail alex@example.com",
+                     r"@\[Alex Example]", "a[b]c"):
+            source = self.oversized(tail)
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(self.module.collect_mention_requests(document), [], tail)
+            node = document["content"][0]["content"][0]
+            self.assertEqual(node["type"], "text", tail)
+            self.assertTrue(node["text"].endswith(tail), tail)
+
+    def test_an_oversized_mention_refuses_before_any_jira_call(self) -> None:
+        """The refusal has to land before the user search and before the write."""
+        for confirm in (False, True):
+            calls: list = []
+
+            def spy(profile, path, **kwargs):
+                calls.append(path)
+                raise AssertionError(f"network reached: {path}")
+
+            args = self.comment_args(body=self.oversized("@[Alex Example]"), confirm=confirm)
+            output = io.StringIO()
+            with patch.object(self.module, "request", side_effect=spy), redirect_stdout(output):
+                with self.assertRaises(self.module.JiraError):
+                    self.module.command_comment(args, self.profile)
+
+            self.assertEqual(calls, [], f"confirm={confirm}")
+            self.assertEqual(output.getvalue(), "", f"confirm={confirm}")
+
+    def test_an_oversized_mention_refusal_stays_bounded_and_quotes_only_the_name(self) -> None:
+        """The refusal must not echo the oversized body back into the log."""
+        with self.assertRaises(self.module.JiraError) as error:
+            self.module.markdown_to_adf(self.oversized("@[" + ("A" * 300) + "]"))
+
+        message = str(error.exception)
+        self.assertLess(len(message), 500)
+        self.assertNotIn("A" * 300, message)
+        self.assertNotIn("x" * 100, message)
+
+    def test_a_link_label_past_the_depth_bound_reserves_rather_than_refuses(self) -> None:
+        """Link labels already keep the syntax literal, so the bound must not refuse there."""
+        deep = "[" * 60 + "@[Alex Example]" + "](https://example.test/a)" * 60
+        document = self.module.markdown_to_adf(deep)
+        self.assertEqual(self.module.collect_mention_requests(document), [])
+
     def test_incomplete_image_syntax_does_not_reserve_the_mention(self) -> None:
         """Only a complete `![label](target)` is an image; a stray `![` is not."""
         document = self.module.markdown_to_adf("![@[Alex Example]]")
