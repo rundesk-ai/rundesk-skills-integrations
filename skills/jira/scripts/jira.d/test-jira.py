@@ -1251,6 +1251,203 @@ class JiraModuleTest(unittest.TestCase):
         )
         self.assertEqual(json.loads(output.getvalue())["comment_id"], "20001")
 
+    # Native mentions. Jira renders a `mention` node as a real tag and notifies the
+    # account it names; the same characters in a text node notify nobody.
+
+    MENTION_ACCOUNT = "synthetic-account-one"
+    OTHER_ACCOUNT = "synthetic-account-two"
+
+    def mention_calls(self, users, write_response=None):
+        """Record every Jira call: `user/search` answers `users`, a write answers next."""
+        calls: list = []
+
+        def fake_request(profile, path, **kwargs):
+            calls.append({"path": path, **kwargs})
+            if path == self.module.MENTION_SEARCH_PATH:
+                return list(users)
+            if write_response is None:
+                raise AssertionError(f"unexpected live write to {path}")
+            return write_response
+
+        return calls, fake_request
+
+    def comment_args(self, **overrides):
+        args = {"issue_key": "APP-252", "body": "Progress update", "confirm": False, "json": False}
+        args.update(overrides)
+        return SimpleNamespace(**args)
+
+    def test_comment_resolves_the_mention_syntax_into_an_adf_mention_node(self) -> None:
+        calls, fake_request = self.mention_calls(
+            [{"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example", "active": True}],
+            write_response={"id": "20002"},
+        )
+        args = self.comment_args(
+            body="@[Alex Example], please review this issue.", confirm=True, json=True
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_comment(args, self.profile)
+
+        search, write = calls
+        self.assertEqual(search["path"], "rest/api/3/user/search")
+        self.assertEqual(search["params"]["query"], "Alex Example")
+        self.assertEqual(write["path"], "rest/api/3/issue/APP-252/comment")
+        content = write["body"]["body"]["content"][0]["content"]
+        self.assertEqual(
+            content[0],
+            {"type": "mention", "attrs": {"id": self.MENTION_ACCOUNT, "text": "@Alex Example"}},
+        )
+        self.assertEqual(content[1], {"type": "text", "text": ", please review this issue."})
+        self.assertEqual(json.loads(output.getvalue())["mention"], "@Alex Example")
+
+    def test_comment_dry_run_names_the_mention_and_project_but_not_the_account_id(self) -> None:
+        calls, fake_request = self.mention_calls(
+            [{"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example", "active": True}]
+        )
+        args = self.comment_args(body="@[Alex Example] please review.")
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_comment(args, self.profile)
+
+        printed = output.getvalue()
+        self.assertIn("DRY-RUN Jira comment add", printed)
+        self.assertIn("profile=example", printed)
+        self.assertIn("project=APP", printed)
+        self.assertIn("issue=APP-252", printed)
+        self.assertIn("mention=@Alex Example", printed)
+        self.assertNotIn(self.MENTION_ACCOUNT, printed)
+        self.assertEqual([call["path"] for call in calls], [self.module.MENTION_SEARCH_PATH])
+
+    def test_mention_refuses_when_no_jira_user_has_that_exact_display_name(self) -> None:
+        """Jira's search matches a prefix, so its neighbours are not the person named."""
+        calls, fake_request = self.mention_calls([
+            {"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example Jr", "active": True},
+            {"accountId": self.OTHER_ACCOUNT, "displayName": "Alexandra Roe", "active": True},
+        ])
+        args = self.comment_args(body="@[Alex Example] please review.", confirm=True)
+        with patch.object(self.module, "request", side_effect=fake_request):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.command_comment(args, self.profile)
+
+        self.assertIn("Alex Example", str(error.exception))
+        self.assertIn("no jira user", str(error.exception).lower())
+        self.assertEqual([call["path"] for call in calls], [self.module.MENTION_SEARCH_PATH])
+
+    def test_mention_refuses_when_two_jira_users_share_the_exact_display_name(self) -> None:
+        calls, fake_request = self.mention_calls([
+            {"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example", "active": True},
+            {"accountId": self.OTHER_ACCOUNT, "displayName": "Alex Example", "active": False},
+        ])
+        args = self.comment_args(body="@[Alex Example] please review.", confirm=True)
+        with patch.object(self.module, "request", side_effect=fake_request):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.command_comment(args, self.profile)
+
+        message = str(error.exception)
+        self.assertIn("2 Jira users", message)
+        self.assertNotIn(self.MENTION_ACCOUNT, message)
+        self.assertEqual([call["path"] for call in calls], [self.module.MENTION_SEARCH_PATH])
+
+    def test_mention_search_refuses_a_full_result_page_it_cannot_prove_unique(self) -> None:
+        """A capped page may hide a second exact match, so uniqueness is not provable."""
+        crowd = [
+            {"accountId": f"account-{index}", "displayName": "Alex Example"}
+            for index in range(self.module.MENTION_SEARCH_LIMIT)
+        ]
+        _, fake_request = self.mention_calls(crowd)
+        args = self.comment_args(body="@[Alex Example] please review.", confirm=True)
+        with patch.object(self.module, "request", side_effect=fake_request):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.command_comment(args, self.profile)
+
+        self.assertIn(str(self.module.MENTION_SEARCH_LIMIT), str(error.exception))
+
+    def test_mention_matches_one_display_name_across_case_and_spacing(self) -> None:
+        calls, fake_request = self.mention_calls(
+            [{"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example"}],
+            write_response={"id": "20003"},
+        )
+        args = self.comment_args(body="@[alex   example] ping", confirm=True, json=True)
+        with patch.object(self.module, "request", side_effect=fake_request), \
+                redirect_stdout(io.StringIO()):
+            self.module.command_comment(args, self.profile)
+
+        mention = calls[1]["body"]["body"]["content"][0]["content"][0]
+        self.assertEqual(mention["attrs"]["text"], "@Alex Example")
+
+    def test_more_than_one_mention_in_one_body_is_refused(self) -> None:
+        args = self.comment_args(body="@[Alex Example] and @[Jane Example] please review.")
+        with patch.object(self.module, "request", side_effect=AssertionError("live call")):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.command_comment(args, self.profile)
+
+        self.assertIn("2", str(error.exception))
+
+    def test_an_ordinary_at_sign_name_stays_plain_text(self) -> None:
+        """The reported defect's own body must keep behaving exactly as it did."""
+        for source in ("@Alex Example, please review.", "mail alex@example.com", "@ [Alex]"):
+            document = self.module.markdown_to_adf(source)
+            self.assertNotIn("mention", json.dumps(document), source)
+            # The `[` escaping adf_to_text already applies is what keeps the readback
+            # from being re-read as a mention, so the round trip is the contract here.
+            rendered = self.module.adf_to_text(document)
+            self.assertEqual(self.module.markdown_to_adf(rendered), document, source)
+
+    def test_mention_syntax_inside_code_or_escaped_stays_literal(self) -> None:
+        for source in ("`@[Alex Example]`", "@\\[Alex Example]"):
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(self.module.collect_mention_requests(document), [], source)
+
+    def test_create_preview_redacts_the_mention_account_id(self) -> None:
+        calls, fake_request = self.mention_calls(
+            [{"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example"}]
+        )
+        args = self.create_args(
+            freeform=True, description="## Objective\n\n@[Alex Example] owns this."
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), \
+                redirect_stderr(io.StringIO()), redirect_stdout(output):
+            self.module.command_create(args, self.profile)
+
+        printed = output.getvalue()
+        self.assertIn("DRY-RUN Jira issue create", printed)
+        self.assertIn("mention=@Alex Example", printed)
+        self.assertIn(self.module.MENTION_ID_REDACTION, printed)
+        self.assertNotIn(self.MENTION_ACCOUNT, printed)
+        self.assertEqual([call["path"] for call in calls], [self.module.MENTION_SEARCH_PATH])
+
+    def test_create_posts_the_real_account_id_in_the_description_mention(self) -> None:
+        calls, fake_request = self.mention_calls(
+            [{"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example"}],
+            write_response={"id": "10002", "key": "APP-254"},
+        )
+        args = self.create_args(
+            freeform=True, confirm=True, description="## Objective\n\n@[Alex Example] owns this."
+        )
+        with patch.object(self.module, "request", side_effect=fake_request), \
+                redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            self.module.command_create(args, self.profile)
+
+        paragraph = calls[1]["body"]["fields"]["description"]["content"][1]["content"]
+        self.assertEqual(
+            paragraph[0],
+            {"type": "mention", "attrs": {"id": self.MENTION_ACCOUNT, "text": "@Alex Example"}},
+        )
+
+    def test_edit_resolves_a_description_mention_and_refuses_before_writing(self) -> None:
+        calls, fake_request = self.mention_calls([])
+        args = SimpleNamespace(
+            issue_key="APP-252", summary=None, description="@[Absent Person] owns this.",
+            description_file=None, clear_description=False, epic=None, epic_field=None,
+            confirm=True, json=False,
+        )
+        with patch.object(self.module, "request", side_effect=fake_request):
+            with self.assertRaises(self.module.JiraError):
+                self.module.command_edit(args, self.profile)
+
+        self.assertEqual([call["path"] for call in calls], [self.module.MENTION_SEARCH_PATH])
+
     def test_create_reads_the_description_from_a_file(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             page = Path(folder) / "description.md"

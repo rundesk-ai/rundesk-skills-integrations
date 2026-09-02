@@ -1,6 +1,6 @@
 ---
 name: jira
-description: Use when the user asks to inspect Jira Cloud projects, issues, epics, boards, sprints, backlog, comments, or attachments; filter issues by epic or sprint state; or create, edit, comment on, attach a file to, assign, or delete an issue. It supplies account-scoped Jira reads and guarded issue mutations with explicit confirmation, rendering markdown descriptions and comments into Jira's own formatting. Do not use it for Jira transitions, bulk operations, or project and site administration.
+description: Use when the user asks to inspect Jira Cloud projects, issues, epics, boards, sprints, backlog, comments, or attachments; filter issues by epic or sprint state; or create, edit, comment on, attach a file to, assign, or delete an issue. It supplies account-scoped Jira reads and guarded issue mutations with explicit confirmation, rendering markdown descriptions and comments into Jira's own formatting, including one explicitly requested native user mention. Do not use it for Jira transitions, bulk operations, or project and site administration.
 ---
 
 # Jira
@@ -40,6 +40,7 @@ Use compact output by default:
 "$RUNDESK_SKILLS/jira/scripts/jira" assign-sprint <KEY-123> --profile <profile> --sprint-id <id>
 "$RUNDESK_SKILLS/jira/scripts/jira" upload <KEY-123> --profile <profile> --file /path/to/file
 "$RUNDESK_SKILLS/jira/scripts/jira" comment <KEY-123> --profile <profile> --body '<text>'
+"$RUNDESK_SKILLS/jira/scripts/jira" comment <KEY-123> --profile <profile> --body '@[Display Name] <text>'
 "$RUNDESK_SKILLS/jira/scripts/jira" delete <KEY-123> --profile <profile>
 ```
 
@@ -50,6 +51,13 @@ sections; `--freeform` skips that check and should stay rare. `edit` is not stru
 keep the template when replacing a whole description. Pass anything structured with
 `--description-file` or `--body-file`, never a multi-line shell argument. Read
 `references/ticket-format.md` for the templates, the section names, and the markdown it renders.
+
+Write `@[Display Name]` to place one native Jira mention in a description or comment; Jira renders
+it as a real mention and applies its own mention notification behavior. A plain `@name` stays text
+and notifies nobody. The command resolves the name through Jira's user search and refuses when no
+account, or more than one, carries that exact display name, so confirm the spelling Jira shows
+before writing. One description or comment carries one mention, and the preview names the resolved
+display name without the account id behind it.
 
 Keep JQL bounded to one project. Use `--json` only when raw structured data is required.
 All mutations are dry-runs by default. Review the exact project, issue key, fields, comment body,

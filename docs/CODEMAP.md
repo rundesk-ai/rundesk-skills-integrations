@@ -31,7 +31,7 @@ Each holds `SKILL.md` for routing and core procedure, and `references/` for deta
 
 | File | What it is |
 |---|---|
-| `manifest.json` | schema, name, version (`0.13.0`), and description |
+| `manifest.json` | schema, name, version (`0.14.0`), and description |
 | `README.md` | the consumer contract: what the catalog is, how to install it, and every package |
 | `ENVIRONMENTS.md` | the runtime, configuration, and credential contract every package obeys |
 | `AGENTS.md`, `CLAUDE.md` | the repository guide, byte-identical by contract |

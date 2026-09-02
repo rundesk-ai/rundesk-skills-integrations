@@ -46,6 +46,8 @@ category: providers
 - Dry-run comment: `jira comment APP-252 --profile example --body "Progress update"`
 - Confirm comment: `jira comment APP-252 --profile example --body "Progress update" --confirm`
 - Comment from a file: `jira comment APP-252 --profile example --body-file /tmp/example-comment.md --confirm`
+- Dry-run a comment with one native mention: `jira comment APP-252 --profile example --body "@[Alex Example] please review."`
+- Confirm a comment with one native mention: `jira comment APP-252 --profile example --body "@[Alex Example] please review." --confirm`
 - Dry-run issue deletion: `jira delete APP-252 --profile example`
 - Confirm issue deletion: `jira delete APP-252 --profile example --confirm`
 - Resolve issue keys from text: `jira identify 'Review APP-252' --all-profiles`
@@ -67,7 +69,8 @@ Default output is compact text for agent context. `list`, `search`, `backlog`, `
 Do not run `create --confirm`, `edit --confirm`, `upload --confirm`, `comment --confirm`, `delete --confirm`, or `attachment --output --confirm` as a smoke test
 unless the owner confirms the exact profile and target/effect. Offline tests cover the write request
 method, markdown-to-ADF rendering, ADF-to-markdown reading, ticket structure validation, description
-and comment input paths, project allowlisting, multipart file upload, dry-runs, and confirmation paths.
+and comment input paths, native mention resolution, refusal, and account-id redaction, project
+allowlisting, multipart file upload, dry-runs, and confirmation paths.
 
 ## Provider
 
@@ -100,6 +103,10 @@ scope documented by Atlassian.
 For uploads, the account also needs Browse Projects and Create attachments for the issue's project.
 The command sends one explicit local file as multipart form data and uses Jira's required
 `X-Atlassian-Token: no-check` header. It never uploads a directory or recursively discovers files.
+
+For a native mention, the account also needs Jira's Browse users and groups permission, because the
+command resolves the display name through `GET /rest/api/3/user/search` before it writes. That
+bounded search is the only extra read a mention makes.
 
 For comments, the account needs Browse projects and Add comments for the issue's project. For issue
 deletion, it needs Browse projects and Delete issues. Jira refuses deletion when the issue has
@@ -211,6 +218,46 @@ document. A construct this catalog does not render — a table,
 a panel, an expand — reads back as its text without that structure, and a mention or emoji reads
 back as its display text.
 
+### Native Mentions
+
+`@[Display Name]` in a description or comment body creates one native Jira mention. A plain
+`@Alex Example` stays the text it has always been, so nothing already written changes meaning.
+
+```text
+--body "@[Alex Example] please review this issue."
+```
+
+The command resolves the name through Jira's own user search and sends an Atlassian Document Format
+`mention` node carrying the resolved account id and Jira's spelling of the display name. Jira
+renders that node as a real mention and applies its normal mention notification behavior for the
+account named; whether a given person is notified also depends on their own Jira notification
+settings and their permission to see the issue.
+
+Resolution is exact, and refuses rather than guesses:
+
+| What Jira's search returns for the name | What the command does |
+|---|---|
+| one account whose display name matches exactly | sends the mention |
+| no exact match | refuses, and reports how many nearby names the search returned |
+| more than one exact match | refuses, and reports how many share that display name |
+| a full 50-result page | refuses, because no match inside it can be proved unique |
+
+Jira's search matches a *prefix* of a display name or email address, so it answers with neighbours
+as well as the person named; only an exact display name selects an account. Matching ignores
+capitalization and repeated spaces, so `@[alex example]` selects `Alex Example`.
+
+One description or comment carries one mention; a second `@[...]` is refused. Resolution runs
+before the dry-run prints, so a name Jira cannot resolve refuses at preview rather than after
+`--confirm`, and it runs after the project allowlist check, so a project this profile may not write
+to never triggers a user search. The preview names the profile, project, issue, and resolved display
+name, and never prints the account id: `create` and `edit` replace it with `(redacted)` in their
+`fields=` output. A confirmed `create`, `edit`, or `comment` reports the mention it sent as
+`mention=@Display Name`.
+
+Write `@\[Display Name]`, or wrap it in backticks, to keep those characters literal. `detail` and
+`comments` render a stored mention as its display text (`@Alex Example`), not as the `@[...]`
+syntax, so a read-back that is re-sent sends plain text rather than mentioning anyone again.
+
 ### Ticket Structure
 
 `create` refuses a description that has no headings, or that is missing the sections its issue type
@@ -263,6 +310,11 @@ section names, and the writing rules.
 - Comment creation and issue deletion are guarded mutations, each requiring `--confirm`.
 - Epic and sprint assignment are guarded one-issue mutations, each requiring `--confirm`; they do
   not start, close, or otherwise manage sprint lifecycle.
+- A native mention is created only by the explicit `@[Display Name]` syntax; an `@name` written in
+  prose stays plain text and notifies nobody.
+- A mention resolves to exactly one Jira account by exact display name. No match, several matches,
+  or a search page too full to prove uniqueness each refuse before anything is written.
+- A preview never prints a Jira account id; `create` and `edit` replace it with `(redacted)`.
 - Comments remain viewable through `comments` and `detail`.
 - Delete targets one issue and never requests deletion of subtasks.
 - The integration does not transition issues, perform bulk operations, or administer projects/sites.
@@ -276,6 +328,8 @@ supported markdown, see [Writing a Jira ticket](ticket-format.md).
 - [Jira issue search](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/)
 - [Jira issues](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/)
 - [Atlassian Document Format](https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/)
+- [ADF mention node](https://developer.atlassian.com/cloud/jira/platform/apis/document/nodes/mention/)
+- [Jira user search](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-user-search/)
 - [Jira comments](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-comments/)
 - [Jira attachments](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-attachments/)
 - [Jira Software boards](https://developer.atlassian.com/cloud/jira/software/rest/api-group-board/)
