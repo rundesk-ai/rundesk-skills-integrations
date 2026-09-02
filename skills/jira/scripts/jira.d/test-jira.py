@@ -1398,6 +1398,84 @@ class JiraModuleTest(unittest.TestCase):
             document = self.module.markdown_to_adf(source)
             self.assertEqual(self.module.collect_mention_requests(document), [], source)
 
+    def link_href(self, source):
+        """The hrefs a rendered source carries, so a lost link fails loudly."""
+        content = self.module.markdown_to_adf(source)["content"][0]["content"]
+        return [
+            mark["attrs"]["href"]
+            for node in content
+            for mark in (node.get("marks") or [])
+            if mark.get("type") == "link"
+        ]
+
+    def test_a_link_whose_label_follows_an_at_sign_keeps_its_href(self) -> None:
+        """`@[label](href)` was a working link before mentions existed; it still is."""
+        source = "@[Alex Example](https://example.test/a)"
+        document = self.module.markdown_to_adf(source)
+        self.assertEqual(self.module.collect_mention_requests(document), [])
+        self.assertEqual(self.link_href(source), ["https://example.test/a"])
+        self.assertEqual(
+            document["content"][0]["content"],
+            [
+                {"type": "text", "text": "@"},
+                {
+                    "type": "text", "text": "Alex Example",
+                    "marks": [{"type": "link", "attrs": {"href": "https://example.test/a"}}],
+                },
+            ],
+        )
+
+    def test_mention_syntax_inside_a_link_label_stays_literal_and_keeps_its_href(self) -> None:
+        """ADF carries a link on a text mark, and a mention node holds no marks."""
+        source = "[@[Alex Example]](https://example.test/a)"
+        document = self.module.markdown_to_adf(source)
+        self.assertEqual(self.module.collect_mention_requests(document), [])
+        self.assertEqual(self.link_href(source), ["https://example.test/a"])
+        self.assertEqual(
+            document["content"][0]["content"],
+            [{
+                "type": "text", "text": "@[Alex Example]",
+                "marks": [{"type": "link", "attrs": {"href": "https://example.test/a"}}],
+            }],
+        )
+
+    def test_mention_syntax_survives_a_link_label_at_any_inline_depth(self) -> None:
+        for source in (
+            "[text @[Alex Example] more](https://example.test/a)",
+            "[**@[Alex Example]**](https://example.test/a)",
+        ):
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(self.module.collect_mention_requests(document), [], source)
+            self.assertEqual(self.link_href(source), ["https://example.test/a"], source)
+
+    def test_an_image_label_holding_mention_syntax_stays_one_literal_run(self) -> None:
+        """An image is text this catalog never renders, label included."""
+        source = "![@[Alex Example]](https://example.test/a)"
+        document = self.module.markdown_to_adf(source)
+        self.assertEqual(self.module.collect_mention_requests(document), [])
+        self.assertEqual(self.link_href(source), [])
+        self.assertEqual(
+            document["content"][0]["content"], [{"type": "text", "text": source}]
+        )
+
+    def test_a_link_body_never_reaches_the_jira_user_search(self) -> None:
+        """A link is not a mention, so it must cost no user lookup and no refusal."""
+        calls, fake_request = self.mention_calls([], write_response={"id": "20004"})
+        args = self.comment_args(
+            body="See @[Alex Example](https://example.test/a) and "
+                 "[@[Jane Example]](https://example.test/b).",
+            confirm=True,
+            json=True,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_comment(args, self.profile)
+
+        self.assertEqual([call["path"] for call in calls], ["rest/api/3/issue/APP-252/comment"])
+        self.assertNotIn("mention", json.loads(output.getvalue()))
+        self.assertIn("https://example.test/a", json.dumps(calls[0]["body"]))
+        self.assertIn("https://example.test/b", json.dumps(calls[0]["body"]))
+
     def test_create_preview_redacts_the_mention_account_id(self) -> None:
         calls, fake_request = self.mention_calls(
             [{"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example"}]

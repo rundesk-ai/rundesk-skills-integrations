@@ -254,9 +254,15 @@ name, and never prints the account id: `create` and `edit` replace it with `(red
 `fields=` output. A confirmed `create`, `edit`, or `comment` reports the mention it sent as
 `mention=@Display Name`.
 
-Write `@\[Display Name]`, or wrap it in backticks, to keep those characters literal. `detail` and
-`comments` render a stored mention as its display text (`@Alex Example`), not as the `@[...]`
-syntax, so a read-back that is re-sent sends plain text rather than mentioning anyone again.
+Write `@\[Display Name]`, or wrap it in backticks, to keep those characters literal. Link and
+image syntax keeps it literal too, and costs no user search: `@[Alex Example](https://example.test/a)`
+stays the link it was before mentions existed, and `[@[Alex Example]](https://example.test/a)` keeps
+both its label text and its href. ADF carries a link on a text node's mark, and a `mention` node
+holds no marks, so a mention is never created where it would drop the link.
+
+`detail` and `comments` render a stored mention as its display text (`@Alex Example`), not as the
+`@[...]` syntax, so a read-back that is re-sent sends plain text rather than mentioning anyone
+again.
 
 ### Ticket Structure
 

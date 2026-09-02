@@ -1703,7 +1703,9 @@ def emphasis_is_bounded(value: str, index: int, token: str, close: int) -> bool:
     return not before.isalnum() and not after.isalnum()
 
 
-def inline_nodes(value: str, marks: tuple = (), depth: int = 0) -> list[dict[str, Any]]:
+def inline_nodes(
+    value: str, marks: tuple = (), depth: int = 0, in_link_label: bool = False
+) -> list[dict[str, Any]]:
     if len(value) > INLINE_SCAN_LIMIT or depth > MAX_INLINE_DEPTH:
         return [text_node(value, marks)] if value else []
     nodes: list[dict[str, Any]] = []
@@ -1746,14 +1748,30 @@ def inline_nodes(value: str, marks: tuple = (), depth: int = 0) -> list[dict[str
             index += run
             continue
 
-        if value.startswith("@[", index):
+        # `@[Name]` is a mention only where the bracket group is not already link or
+        # image syntax. `@[Name](href)` is a link somebody wrote before mentions
+        # existed, and inside a link label ADF carries the href on a text node's mark,
+        # which a mention node cannot hold — resolving either would drop the link.
+        if value.startswith("@[", index) and not in_link_label:
             close = match_pair(value, index + 1, "[", "]")
             name = " ".join(value[index + 2:close].split()) if close != -1 else ""
-            if name:
+            followed_by_target = close != -1 and close + 1 < length and value[close + 1] == "("
+            if name and not followed_by_target:
                 flush()
                 nodes.append({"type": MENTION_REQUEST_TYPE, "attrs": {"text": name}})
                 index = close + 1
                 continue
+
+        # An image is literal text here, so buffer the whole construct rather than its
+        # opening bracket alone: its label is not a place a mention can be requested.
+        if char == "[" and index and value[index - 1] == "!":
+            close = match_pair(value, index, "[", "]")
+            if close != -1 and close + 1 < length and value[close + 1] == "(":
+                paren = match_pair(value, close + 1, "(", ")")
+                if paren != -1:
+                    buffer.append(value[index:paren + 1])
+                    index = paren + 1
+                    continue
 
         if char == "[" and not (index and value[index - 1] == "!"):
             close = match_pair(value, index, "[", "]")
@@ -1762,7 +1780,9 @@ def inline_nodes(value: str, marks: tuple = (), depth: int = 0) -> list[dict[str
                 href = value[close + 2:paren].strip() if paren != -1 else ""
                 if href and LINK_SCHEME_RE.match(href):
                     flush()
-                    inner = inline_nodes(value[index + 1:close], marks, depth + 1) or [text_node(href, marks)]
+                    inner = inline_nodes(
+                        value[index + 1:close], marks, depth + 1, in_link_label=True
+                    ) or [text_node(href, marks)]
                     for node in inner:
                         node.setdefault("marks", []).append(
                             {"type": "link", "attrs": {"href": href}}
@@ -1784,7 +1804,9 @@ def inline_nodes(value: str, marks: tuple = (), depth: int = 0) -> list[dict[str
             if not emphasis_is_bounded(value, index, token, close):
                 continue
             flush()
-            nodes.extend(inline_nodes(value[index + len(token):close], marks + added, depth + 1))
+            nodes.extend(
+                inline_nodes(value[index + len(token):close], marks + added, depth + 1, in_link_label)
+            )
             index = close + len(token)
             opened = True
             break
