@@ -1448,14 +1448,67 @@ class JiraModuleTest(unittest.TestCase):
             self.assertEqual(self.module.collect_mention_requests(document), [], source)
             self.assertEqual(self.link_href(source), ["https://example.test/a"], source)
 
-    def test_an_image_label_holding_mention_syntax_stays_one_literal_run(self) -> None:
-        """An image is text this catalog never renders, label included."""
-        source = "![@[Alex Example]](https://example.test/a)"
+    def test_a_complete_image_holding_mention_syntax_stays_one_literal_run(self) -> None:
+        """A complete image is text, so `@[...]` in its label is syntax, not a request."""
+        source = "![@[Alex Example]](https://example.test/a.png)"
         document = self.module.markdown_to_adf(source)
         self.assertEqual(self.module.collect_mention_requests(document), [])
         self.assertEqual(self.link_href(source), [])
         self.assertEqual(
             document["content"][0]["content"], [{"type": "text", "text": source}]
+        )
+
+    def test_an_image_label_still_renders_its_own_inline_markup(self) -> None:
+        """Suppressing a mention inside an image must not flatten the label itself."""
+        expected = {
+            "![**b**](https://example.test/i.png)": [
+                {"type": "text", "text": "!["},
+                {"type": "text", "text": "b", "marks": [{"type": "strong"}]},
+                {"type": "text", "text": "](https://example.test/i.png)"},
+            ],
+            "![`c`](https://example.test/i.png)": [
+                {"type": "text", "text": "!["},
+                {"type": "text", "text": "c", "marks": [{"type": "code"}]},
+                {"type": "text", "text": "](https://example.test/i.png)"},
+            ],
+            "![*e*](https://example.test/i.png)": [
+                {"type": "text", "text": "!["},
+                {"type": "text", "text": "e", "marks": [{"type": "em"}]},
+                {"type": "text", "text": "](https://example.test/i.png)"},
+            ],
+            "![~~s~~](https://example.test/i.png)": [
+                {"type": "text", "text": "!["},
+                {"type": "text", "text": "s", "marks": [{"type": "strike"}]},
+                {"type": "text", "text": "](https://example.test/i.png)"},
+            ],
+            "![x [y](https://example.test/y) z](https://example.test/i.png)": [
+                {"type": "text", "text": "![x "},
+                {
+                    "type": "text", "text": "y",
+                    "marks": [{"type": "link", "attrs": {"href": "https://example.test/y"}}],
+                },
+                {"type": "text", "text": " z](https://example.test/i.png)"},
+            ],
+            "![a\\]b](https://example.test/i.png)": [
+                {"type": "text", "text": "![a]b](https://example.test/i.png)"},
+            ],
+        }
+        for source, content in expected.items():
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(self.module.collect_mention_requests(document), [], source)
+            self.assertEqual(document["content"][0]["content"], content, source)
+
+    def test_incomplete_image_syntax_does_not_reserve_the_mention(self) -> None:
+        """Only a complete `![label](target)` is an image; a stray `![` is not."""
+        document = self.module.markdown_to_adf("![@[Alex Example]]")
+        self.assertEqual(self.module.collect_mention_requests(document), ["Alex Example"])
+        self.assertEqual(
+            document["content"][0]["content"],
+            [
+                {"type": "text", "text": "!["},
+                {"type": "mentionRequest", "attrs": {"text": "Alex Example"}},
+                {"type": "text", "text": "]"},
+            ],
         )
 
     def test_a_link_body_never_reaches_the_jira_user_search(self) -> None:

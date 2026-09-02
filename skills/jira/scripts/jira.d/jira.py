@@ -1712,6 +1712,8 @@ def inline_nodes(
     buffer: list[str] = []
     index = 0
     length = len(value)
+    # The closing `]` of the innermost complete image label this scan is inside, or -1.
+    image_label_end = -1
 
     def flush() -> None:
         if buffer:
@@ -1752,7 +1754,7 @@ def inline_nodes(
         # image syntax. `@[Name](href)` is a link somebody wrote before mentions
         # existed, and inside a link label ADF carries the href on a text node's mark,
         # which a mention node cannot hold — resolving either would drop the link.
-        if value.startswith("@[", index) and not in_link_label:
+        if value.startswith("@[", index) and not in_link_label and index > image_label_end:
             close = match_pair(value, index + 1, "[", "]")
             name = " ".join(value[index + 2:close].split()) if close != -1 else ""
             followed_by_target = close != -1 and close + 1 < length and value[close + 1] == "("
@@ -1762,16 +1764,16 @@ def inline_nodes(
                 index = close + 1
                 continue
 
-        # An image is literal text here, so buffer the whole construct rather than its
-        # opening bracket alone: its label is not a place a mention can be requested.
+        # A complete `![label](href)` is an image this catalog leaves as text, so `@[...]`
+        # inside its label is reserved syntax rather than a mention request. Only the
+        # boundary is recorded: the label's own emphasis, code, escapes, and nested links
+        # are still parsed below, exactly as they were before mentions existed.
         if char == "[" and index and value[index - 1] == "!":
             close = match_pair(value, index, "[", "]")
             if close != -1 and close + 1 < length and value[close + 1] == "(":
-                paren = match_pair(value, close + 1, "(", ")")
-                if paren != -1:
-                    buffer.append(value[index:paren + 1])
-                    index = paren + 1
-                    continue
+                if match_pair(value, close + 1, "(", ")") != -1:
+                    # An image nested in an image must not lower the outer boundary.
+                    image_label_end = max(image_label_end, close)
 
         if char == "[" and not (index and value[index - 1] == "!"):
             close = match_pair(value, index, "[", "]")

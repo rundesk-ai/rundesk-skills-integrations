@@ -190,7 +190,9 @@ Escape a character with a backslash when you need it literally: `\*not emphasis\
 display name through Jira before writing, and Jira notifies the account it names. A bare
 `@Alex Example` stays plain text and notifies nobody. One description or comment carries one
 mention, and a name matching no Jira account, or more than one, is refused before the ticket is
-written. Write `@\[Alex Example]` to keep the characters literal. See
+written. Write `@\[Alex Example]` to keep the characters literal; so does a complete link or image
+form, so `@[Alex Example](https://example.test/a)` is still a link and
+`![@[Alex Example]](https://example.test/i.png)` is still text. See
 [the CLI reference](cli.md) for the resolution and preview rules.
 
 ## Reading a ticket back
