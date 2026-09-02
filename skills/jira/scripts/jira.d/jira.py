@@ -1704,7 +1704,11 @@ def emphasis_is_bounded(value: str, index: int, token: str, close: int) -> bool:
 
 
 def inline_nodes(
-    value: str, marks: tuple = (), depth: int = 0, in_link_label: bool = False
+    value: str,
+    marks: tuple = (),
+    depth: int = 0,
+    in_link_label: bool = False,
+    in_image_label: bool = False,
 ) -> list[dict[str, Any]]:
     if len(value) > INLINE_SCAN_LIMIT or depth > MAX_INLINE_DEPTH:
         return [text_node(value, marks)] if value else []
@@ -1712,7 +1716,9 @@ def inline_nodes(
     buffer: list[str] = []
     index = 0
     length = len(value)
-    # The closing `]` of the innermost complete image label this scan is inside, or -1.
+    # The closing `]` of the innermost complete image label opened in this scan, or -1.
+    # It indexes `value`, so a recursion that slices `value` carries `in_image_label`
+    # instead: the index means nothing in the substring's own coordinates.
     image_label_end = -1
 
     def flush() -> None:
@@ -1754,7 +1760,12 @@ def inline_nodes(
         # image syntax. `@[Name](href)` is a link somebody wrote before mentions
         # existed, and inside a link label ADF carries the href on a text node's mark,
         # which a mention node cannot hold — resolving either would drop the link.
-        if value.startswith("@[", index) and not in_link_label and index > image_label_end:
+        if (
+            value.startswith("@[", index)
+            and not in_link_label
+            and not in_image_label
+            and index > image_label_end
+        ):
             close = match_pair(value, index + 1, "[", "]")
             name = " ".join(value[index + 2:close].split()) if close != -1 else ""
             followed_by_target = close != -1 and close + 1 < length and value[close + 1] == "("
@@ -1807,7 +1818,15 @@ def inline_nodes(
                 continue
             flush()
             nodes.extend(
-                inline_nodes(value[index + len(token):close], marks + added, depth + 1, in_link_label)
+                inline_nodes(
+                    value[index + len(token):close],
+                    marks + added,
+                    depth + 1,
+                    in_link_label,
+                    # `index` is still this frame's, so the boundary is resolved here and
+                    # handed down as context the substring can honour.
+                    in_image_label or index <= image_label_end,
+                )
             )
             index = close + len(token)
             opened = True

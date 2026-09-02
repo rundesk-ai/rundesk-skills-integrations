@@ -1498,6 +1498,71 @@ class JiraModuleTest(unittest.TestCase):
             self.assertEqual(self.module.collect_mention_requests(document), [], source)
             self.assertEqual(document["content"][0]["content"], content, source)
 
+    def test_a_complete_image_reserves_the_syntax_at_every_inline_depth(self) -> None:
+        """Emphasis recursion slices the scan, so the boundary travels as context.
+
+        The literal text keeps whatever marks the label gave it: suppressing the
+        mention must not also strip the strong, em, or strike around it.
+        """
+        image = "https://example.test/i.png"
+        marked = [
+            ("**@[Alex Example]**", [{"type": "strong"}]),
+            ("*@[Alex Example]*", [{"type": "em"}]),
+            ("_@[Alex Example]_", [{"type": "em"}]),
+            ("~~@[Alex Example]~~", [{"type": "strike"}]),
+            ("***@[Alex Example]***", [{"type": "strong"}, {"type": "em"}]),
+            ("**~~@[Alex Example]~~**", [{"type": "strong"}, {"type": "strike"}]),
+        ]
+        for label, expected_marks in marked:
+            source = f"![{label}]({image})"
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(self.module.collect_mention_requests(document), [], source)
+            self.assertEqual(
+                document["content"][0]["content"],
+                [
+                    {"type": "text", "text": "!["},
+                    {"type": "text", "text": "@[Alex Example]", "marks": expected_marks},
+                    {"type": "text", "text": f"]({image})"},
+                ],
+                source,
+            )
+
+    def test_a_complete_image_reserves_the_syntax_after_a_code_span_or_link(self) -> None:
+        """The other two recursion paths into a label must reserve it as well."""
+        image = "https://example.test/i.png"
+        for source in (
+            f"![`@[Alex Example]`]({image})",
+            f"![[@[Alex Example]](https://example.test/y)]({image})",
+            f"![x **@[Alex Example]** y]({image})",
+        ):
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(self.module.collect_mention_requests(document), [], source)
+
+    def test_marks_outside_an_image_still_carry_a_mention_request(self) -> None:
+        """The reservation is the image, not the mark, so ordinary emphasis still asks."""
+        for source in (
+            "**@[Alex Example]** please review.",
+            "*@[Alex Example]* please review.",
+            "~~@[Alex Example]~~ please review.",
+        ):
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(
+                self.module.collect_mention_requests(document), ["Alex Example"], source
+            )
+
+    def test_an_image_label_body_never_reaches_the_jira_user_search(self) -> None:
+        calls, fake_request = self.mention_calls([], write_response={"id": "20005"})
+        args = self.comment_args(
+            body="![**@[Alex Example]**](https://example.test/i.png)", confirm=True, json=True
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_comment(args, self.profile)
+
+        self.assertEqual([call["path"] for call in calls], ["rest/api/3/issue/APP-252/comment"])
+        self.assertNotIn("mention", json.loads(output.getvalue()))
+        self.assertNotIn("mentionRequest", json.dumps(calls[0]["body"]))
+
     def test_incomplete_image_syntax_does_not_reserve_the_mention(self) -> None:
         """Only a complete `![label](target)` is an image; a stray `![` is not."""
         document = self.module.markdown_to_adf("![@[Alex Example]]")
