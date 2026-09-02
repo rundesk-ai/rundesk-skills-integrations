@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import io
+import itertools
 import json
 import os
 import re
@@ -1602,6 +1603,63 @@ class JiraModuleTest(unittest.TestCase):
             node = document["content"][0]["content"][0]
             self.assertEqual(node["type"], "text", tail)
             self.assertTrue(node["text"].endswith(tail), tail)
+
+    MENTION_SHAPES_THE_WRITER_ACCEPTS = (
+        "@[Alex Example]",
+        "@[Alex [Example]]",
+        "@[A [B [C]] D]",
+        "@[Alex (Example)]",
+        "\\@[Alex Example]",
+    )
+
+    def test_every_mention_shape_the_writer_accepts_refuses_past_the_limit(self) -> None:
+        """The detector has to cover the writer's balanced brackets, not just a flat name.
+
+        `match_pair` accepts a nested bracket, so `@[Alex [Example]]` is a real request.
+        A detector that excluded nested brackets wrote it out as text instead.
+        """
+        for shape in self.MENTION_SHAPES_THE_WRITER_ACCEPTS:
+            with self.subTest(shape=shape):
+                self.assertTrue(
+                    self.module.collect_mention_requests(self.module.markdown_to_adf(shape)),
+                    "fixture no longer parses as a mention",
+                )
+                with self.assertRaises(self.module.JiraError):
+                    self.module.markdown_to_adf(self.oversized(shape))
+
+    def test_apparent_syntax_refuses_conservatively_past_the_limit(self) -> None:
+        """Classifying these needs the scan the limit forbids, so they refuse as apparent.
+
+        Each one is literal text to the ordinary writer. Refusing is the documented
+        conservative half of the contract: never silently write something that looks
+        like a mention.
+        """
+        for apparent in ("@[   ]", "@[]", "@[Alex Example",
+                         "`@[Alex Example]`",
+                         "@[Alex Example](https://example.test/a)",
+                         "![@[Alex Example]](https://example.test/i.png)"):
+            with self.subTest(apparent=apparent):
+                self.assertEqual(
+                    self.module.collect_mention_requests(self.module.markdown_to_adf(apparent)),
+                    [],
+                    "fixture should be literal to the ordinary writer",
+                )
+                with self.assertRaises(self.module.JiraError):
+                    self.module.markdown_to_adf(self.oversized(apparent))
+
+    def test_the_detector_never_misses_a_request_the_writer_would_make(self) -> None:
+        """Soundness over generated candidates: recognized short implies refused oversized."""
+        alphabet = "@[]\\`() !*A"
+        candidates = {"".join(combo) for combo in itertools.product(alphabet, repeat=3)}
+        candidates.update(self.MENTION_SHAPES_THE_WRITER_ACCEPTS)
+        recognized = 0
+        for candidate in candidates:
+            if not self.module.collect_mention_requests(self.module.markdown_to_adf(candidate)):
+                continue
+            recognized += 1
+            with self.assertRaises(self.module.JiraError, msg=repr(candidate)):
+                self.module.markdown_to_adf(self.oversized(candidate))
+        self.assertGreater(recognized, 0, "the sweep exercised no mention at all")
 
     def test_an_oversized_mention_refuses_before_any_jira_call(self) -> None:
         """The refusal has to land before the user search and before the write."""

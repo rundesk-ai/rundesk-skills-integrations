@@ -267,11 +267,20 @@ image, so `![@[Alex Example]]` still requests a mention. Nothing else about a li
 changes: a label's emphasis, code, escapes, and nested links render exactly as they did before.
 
 A mention has to sit in a line of at most 20000 characters, the limit that keeps the markdown
-writer's own scanning bounded. A longer line is still accepted as text, but `@[Display Name]` inside
-one is refused rather than sent: written as text it names somebody Jira never notifies. Split the
-paragraph so the mention sits in a shorter line, or escape it as `@\[Name]` to keep it literal. The
-refusal names the syntax it found and nothing else from the line, and it happens before the user
-search, so no oversized body reaches Jira.
+writer's own scanning bounded. A longer line is still accepted as text, but a `@[` anywhere in one
+is refused rather than sent: written as text it would name somebody Jira never notifies.
+
+That check is deliberately blunt. Within the limit the writer decides what is a mention by scanning
+for the balanced closing bracket, so a display name may itself contain brackets — `@[Alex [Example]]`
+is a real mention. Past the limit that scan is exactly what cannot be run, so the command refuses
+*apparent* mention syntax rather than claiming to tell the cases apart. In a long line `@[]`,
+`@[   ]`, an unclosed `@[`, and a `@[Name]` inside a code span, a link, or an image label are all
+refused, though a short line writes each of them as literal text.
+
+Split the paragraph so the mention sits in a shorter line, or escape it as `@\[Name]` — an escaped
+opener holds no `@[`, so it stays literal at any length. The refusal quotes at most 60 characters of
+the candidate and nothing else from the line, and it happens before the user search, so no oversized
+body reaches Jira.
 
 `detail` and `comments` render a stored mention as its display text (`@Alex Example`), not as the
 `@[...]` syntax, so a read-back that is re-sent sends plain text rather than mentioning anyone

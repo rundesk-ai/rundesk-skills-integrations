@@ -1589,10 +1589,18 @@ MAX_LIST_DEPTH = 8
 MENTION_REQUEST_TYPE = "mentionRequest"
 MENTION_SYNTAX = "@[Display Name]"
 
-# Matches what the writer below would take as a mention request. `@\[Name]` does not
-# match, because the writer does not read that as one either. Searching is linear and
-# parses nothing, so it stays inside the bound it is used to police.
-MENTION_SYNTAX_RE = re.compile(r"@\[[^\[\]\n]+\]")
+# The writer opens a mention request on exactly this pair of characters, and only then
+# looks for a balanced closing bracket. Every request it can recognize therefore holds
+# `@[`, which makes finding the pair a sound test for apparent mention syntax: it can
+# name more candidates than the writer would accept, never fewer. Matching the writer's
+# balanced-bracket grammar instead would mean scanning ahead from every candidate, which
+# is the quadratic work the scan limit exists to prevent. `@\[Name]` does not hold the
+# pair, so escaping still keeps the syntax literal without any scanning at all.
+MENTION_SYNTAX_OPENER = "@["
+
+# How much of an apparent mention the refusal may quote back, so a long name or a
+# pasted body cannot reach the log through the error message.
+MENTION_SYNTAX_ECHO = 60
 
 
 def indent_width(value: str) -> int:
@@ -1722,15 +1730,16 @@ def inline_nodes(
         # never tells. A link or image label is the one place the syntax is already
         # reserved as literal, so only the contexts that would have resolved it refuse.
         if not in_link_label and not in_image_label:
-            found = MENTION_SYNTAX_RE.search(value)
-            if found:
+            at = value.find(MENTION_SYNTAX_OPENER)
+            if at != -1:
+                candidate = clip(value[at:at + MENTION_SYNTAX_ECHO], MENTION_SYNTAX_ECHO)
                 raise JiraError(
-                    f"{MENTION_SYNTAX} appears in an inline segment longer than the "
-                    f"{INLINE_SCAN_LIMIT} character scan limit, where mentions are not "
-                    f"resolved. Refusing to send {clip(found.group(0), 80)} as plain text, "
-                    "which would name someone Jira never notifies. Split the paragraph so "
-                    "the mention sits in a shorter line, or escape it as `@\\[Name]` to "
-                    "keep it literal."
+                    f"Apparent {MENTION_SYNTAX} syntax at {candidate} sits in an inline segment "
+                    f"longer than the {INLINE_SCAN_LIMIT} character scan limit, where mentions "
+                    "are not resolved. Refusing to send it as text that names someone Jira never "
+                    "notifies. Split the paragraph so the mention sits in a shorter line, or "
+                    "escape it as `@\\[Name]`. Every `@[` is refused here: telling a mention from "
+                    "literal text needs the scan this limit rules out."
                 )
         return [text_node(value, marks)] if value else []
     nodes: list[dict[str, Any]] = []
