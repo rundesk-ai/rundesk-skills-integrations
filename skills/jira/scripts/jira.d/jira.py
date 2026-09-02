@@ -1581,6 +1581,24 @@ MAX_INLINE_DEPTH = 50
 MAX_LIST_DEPTH = 8
 
 
+# `@[Display Name]` is the only way to ask for a native Jira mention; a bare `@name`
+# stays the plain text it has always been. The inline writer cannot reach Jira, so it
+# leaves this placeholder and document_with_mentions() replaces it with the resolved
+# account. Every command that sends a document renders it through that function, so a
+# placeholder never reaches Jira.
+MENTION_REQUEST_TYPE = "mentionRequest"
+MENTION_SYNTAX = "@[Display Name]"
+
+# The writer opens a mention request on exactly this pair of characters, and only then
+# looks for a balanced closing bracket. Every request it can recognize therefore holds
+# `@[`, which makes finding the pair a sound test for apparent mention syntax: it can
+# name more candidates than the writer would accept, never fewer. Matching the writer's
+# balanced-bracket grammar instead would mean scanning ahead from every candidate, which
+# is the quadratic work the scan limit exists to prevent. `@\[Name]` does not hold the
+# pair, so escaping still keeps the syntax literal without any scanning at all.
+MENTION_SYNTAX_OPENER = "@["
+
+
 def indent_width(value: str) -> int:
     width = 0
     for char in value:
@@ -1694,13 +1712,41 @@ def emphasis_is_bounded(value: str, index: int, token: str, close: int) -> bool:
     return not before.isalnum() and not after.isalnum()
 
 
-def inline_nodes(value: str, marks: tuple = (), depth: int = 0) -> list[dict[str, Any]]:
+def inline_nodes(
+    value: str,
+    marks: tuple = (),
+    depth: int = 0,
+    in_link_label: bool = False,
+    in_image_label: bool = False,
+) -> list[dict[str, Any]]:
     if len(value) > INLINE_SCAN_LIMIT or depth > MAX_INLINE_DEPTH:
+        # Past the bound this segment is handed back as written, which is right for
+        # prose and wrong for a mention: `@[Display Name]` asks for someone to be
+        # notified, and writing it as text posts a comment that names a person Jira
+        # never tells. A link or image label is the one place the syntax is already
+        # reserved as literal, so only the contexts that would have resolved it refuse.
+        if not in_link_label and not in_image_label:
+            # The refusal says only what is fixed here. Quoting the candidate back would
+            # put a window of the body on stderr, and a body is where a pasted token,
+            # header, or cookie sits; the author already knows what they wrote.
+            if MENTION_SYNTAX_OPENER in value:
+                raise JiraError(
+                    f"Apparent {MENTION_SYNTAX} syntax sits in an inline segment longer than "
+                    f"the {INLINE_SCAN_LIMIT} character scan limit, where mentions are not "
+                    "resolved. Refusing to send it as text that names someone Jira never "
+                    "notifies. Split the paragraph so the mention sits in a shorter line, or "
+                    f"escape it as `@\\[Name]`. Every `{MENTION_SYNTAX_OPENER}` is refused here: "
+                    "telling a mention from literal text needs the scan this limit rules out."
+                )
         return [text_node(value, marks)] if value else []
     nodes: list[dict[str, Any]] = []
     buffer: list[str] = []
     index = 0
     length = len(value)
+    # The closing `]` of the innermost complete image label opened in this scan, or -1.
+    # It indexes `value`, so a recursion that slices `value` carries `in_image_label`
+    # instead: the index means nothing in the substring's own coordinates.
+    image_label_end = -1
 
     def flush() -> None:
         if buffer:
@@ -1737,6 +1783,36 @@ def inline_nodes(value: str, marks: tuple = (), depth: int = 0) -> list[dict[str
             index += run
             continue
 
+        # `@[Name]` is a mention only where the bracket group is not already link or
+        # image syntax. `@[Name](href)` is a link somebody wrote before mentions
+        # existed, and inside a link label ADF carries the href on a text node's mark,
+        # which a mention node cannot hold — resolving either would drop the link.
+        if (
+            value.startswith("@[", index)
+            and not in_link_label
+            and not in_image_label
+            and index > image_label_end
+        ):
+            close = match_pair(value, index + 1, "[", "]")
+            name = " ".join(value[index + 2:close].split()) if close != -1 else ""
+            followed_by_target = close != -1 and close + 1 < length and value[close + 1] == "("
+            if name and not followed_by_target:
+                flush()
+                nodes.append({"type": MENTION_REQUEST_TYPE, "attrs": {"text": name}})
+                index = close + 1
+                continue
+
+        # A complete `![label](href)` is an image this catalog leaves as text, so `@[...]`
+        # inside its label is reserved syntax rather than a mention request. Only the
+        # boundary is recorded: the label's own emphasis, code, escapes, and nested links
+        # are still parsed below, exactly as they were before mentions existed.
+        if char == "[" and index and value[index - 1] == "!":
+            close = match_pair(value, index, "[", "]")
+            if close != -1 and close + 1 < length and value[close + 1] == "(":
+                if match_pair(value, close + 1, "(", ")") != -1:
+                    # An image nested in an image must not lower the outer boundary.
+                    image_label_end = max(image_label_end, close)
+
         if char == "[" and not (index and value[index - 1] == "!"):
             close = match_pair(value, index, "[", "]")
             if close != -1 and close + 1 < length and value[close + 1] == "(":
@@ -1744,7 +1820,9 @@ def inline_nodes(value: str, marks: tuple = (), depth: int = 0) -> list[dict[str
                 href = value[close + 2:paren].strip() if paren != -1 else ""
                 if href and LINK_SCHEME_RE.match(href):
                     flush()
-                    inner = inline_nodes(value[index + 1:close], marks, depth + 1) or [text_node(href, marks)]
+                    inner = inline_nodes(
+                        value[index + 1:close], marks, depth + 1, in_link_label=True
+                    ) or [text_node(href, marks)]
                     for node in inner:
                         node.setdefault("marks", []).append(
                             {"type": "link", "attrs": {"href": href}}
@@ -1766,7 +1844,17 @@ def inline_nodes(value: str, marks: tuple = (), depth: int = 0) -> list[dict[str
             if not emphasis_is_bounded(value, index, token, close):
                 continue
             flush()
-            nodes.extend(inline_nodes(value[index + len(token):close], marks + added, depth + 1))
+            nodes.extend(
+                inline_nodes(
+                    value[index + len(token):close],
+                    marks + added,
+                    depth + 1,
+                    in_link_label,
+                    # `index` is still this frame's, so the boundary is resolved here and
+                    # handed down as context the substring can honour.
+                    in_image_label or index <= image_label_end,
+                )
+            )
             index = close + len(token)
             opened = True
             break
@@ -1968,6 +2056,124 @@ def markdown_to_adf(value: str) -> dict[str, Any]:
     return {"type": "doc", "version": 1, "content": content or [{"type": "paragraph"}]}
 
 
+# Jira's user search matches a prefix of displayName or emailAddress, so it answers with
+# neighbours as well as the person named, and the page it returns is bounded.
+MENTION_SEARCH_PATH = "rest/api/3/user/search"
+MENTION_SEARCH_LIMIT = 50
+
+# A mention carries the account id Jira notifies. That id is a private account
+# identifier, so a preview names who is mentioned and never how to address them.
+MENTION_ID_REDACTION = "(redacted)"
+
+
+def normalized_display_name(value: str) -> str:
+    """One spelling of a display name, so `alex   example` still selects `Alex Example`."""
+    return " ".join(value.split()).casefold()
+
+
+def collect_mention_requests(document: Any) -> list[str]:
+    """Every name `@[Display Name]` asked for, in the order the document holds them."""
+    if isinstance(document, dict):
+        if document.get("type") == MENTION_REQUEST_TYPE:
+            return [str((document.get("attrs") or {}).get("text") or "")]
+        return [name for item in document.values() for name in collect_mention_requests(item)]
+    if isinstance(document, list):
+        return [name for item in document for name in collect_mention_requests(item)]
+    return []
+
+
+def replace_mention_requests(document: Any, mention: dict[str, Any]) -> Any:
+    if isinstance(document, dict):
+        if document.get("type") == MENTION_REQUEST_TYPE:
+            return mention
+        return {key: replace_mention_requests(item, mention) for key, item in document.items()}
+    if isinstance(document, list):
+        return [replace_mention_requests(item, mention) for item in document]
+    return document
+
+
+def resolve_mention(profile: Profile, name: str) -> dict[str, Any]:
+    """Select the one Jira account whose display name is exactly `name`.
+
+    A mention writes an account id into a ticket the whole project reads, and Jira
+    notifies whoever it names. Jira's search is a prefix match, so taking its first or
+    closest answer would tag the wrong person: only an exact display name selects an
+    account, and zero or several refuse before anything is written.
+    """
+    results = request(
+        profile,
+        MENTION_SEARCH_PATH,
+        params={"query": name, "maxResults": MENTION_SEARCH_LIMIT},
+    )
+    if not isinstance(results, list):
+        raise JiraError(f"Jira user search returned an unexpected response for mention {name!r}.")
+    if len(results) >= MENTION_SEARCH_LIMIT:
+        # A filled page may hide a second account with the same display name, so
+        # uniqueness cannot be proved and a single match here would be a guess.
+        raise JiraError(
+            f"Jira user search for {name!r} filled its {MENTION_SEARCH_LIMIT}-result page, so no "
+            "match can be proved unique; refusing to mention. Write the display name in full."
+        )
+
+    wanted = normalized_display_name(name)
+    matches = [
+        user
+        for user in results
+        if isinstance(user, dict)
+        and isinstance(user.get("accountId"), str)
+        and isinstance(user.get("displayName"), str)
+        and normalized_display_name(user["displayName"]) == wanted
+    ]
+    if not matches:
+        raise JiraError(
+            f"No Jira user on profile {profile.name} has the exact display name {name!r}; "
+            f"refusing to mention. Jira's prefix search returned {len(results)} nearby name(s)."
+        )
+    if len(matches) > 1:
+        raise JiraError(
+            f"{len(matches)} Jira users share the exact display name {name!r} on profile "
+            f"{profile.name}; refusing to guess which one to mention."
+        )
+    # attrs.id is the account Jira notifies; attrs.text is what a reader sees, and it
+    # carries Jira's own spelling of the name rather than the caller's.
+    return {
+        "type": "mention",
+        "attrs": {"id": matches[0]["accountId"], "text": "@" + matches[0]["displayName"]},
+    }
+
+
+def document_with_mentions(value: str, profile: Profile) -> tuple[dict[str, Any], str | None]:
+    """Render markdown to ADF, then resolve the one native mention it may ask for.
+
+    Resolution runs before the dry-run prints, so a name Jira cannot resolve refuses at
+    preview rather than after the owner has confirmed the write.
+    """
+    document = markdown_to_adf(value)
+    requested = collect_mention_requests(document)
+    if not requested:
+        return document, None
+    if len(requested) > 1:
+        raise JiraError(
+            f"Found {len(requested)} {MENTION_SYNTAX} mentions; one description or comment "
+            "carries one. Keep one and write the other names as plain text."
+        )
+    mention = resolve_mention(profile, requested[0])
+    return replace_mention_requests(document, mention), mention["attrs"]["text"]
+
+
+def redacted_mentions(value: Any) -> Any:
+    """Copy a document with every mention account id replaced, for preview output only."""
+    if isinstance(value, dict):
+        node = {key: redacted_mentions(item) for key, item in value.items()}
+        attrs = node.get("attrs")
+        if node.get("type") == "mention" and isinstance(attrs, dict) and "id" in attrs:
+            node["attrs"] = {**attrs, "id": MENTION_ID_REDACTION}
+        return node
+    if isinstance(value, list):
+        return [redacted_mentions(item) for item in value]
+    return value
+
+
 # A description or comment is text a person or agent wrote. Anything past this is a
 # mistake or a pasted binary, and Jira rejects it long before it arrives, so the read
 # is bounded rather than pulling an arbitrary file into memory.
@@ -2089,15 +2295,19 @@ def epic_assignment_fields(profile: Profile, epic: str, requested_field: str | N
     return {field_id: {"key": epic}} if field_id == "parent" else {field_id: epic}
 
 
-def build_issue_fields(args: argparse.Namespace, profile: Profile) -> dict[str, Any]:
+def build_issue_fields(
+    args: argparse.Namespace, profile: Profile
+) -> tuple[dict[str, Any], str | None]:
+    """The issue fields, and the display name of the mention the description carries."""
     fields: dict[str, Any] = {"summary": args.summary}
+    mentioned: str | None = None
     description = argument_text(args, "description")
     if description is not None:
-        fields["description"] = markdown_to_adf(description)
+        fields["description"], mentioned = document_with_mentions(description, profile)
     epic = getattr(args, "epic", None)
     if epic:
         fields.update(epic_assignment_fields(profile, epic, getattr(args, "epic_field", None)))
-    return fields
+    return fields, mentioned
 
 
 # A ticket a developer can act on states what it wants, why, and how anyone can tell it
@@ -2221,10 +2431,11 @@ def command_create(args: argparse.Namespace, profile: Profile) -> int:
     if not args.issue_type.strip():
         raise JiraError("Issue type must not be empty.")
 
+    issue_fields, mentioned = build_issue_fields(args, profile)
     fields = {
         "project": {"key": args.project},
         "issuetype": {"name": args.issue_type},
-        **build_issue_fields(args, profile),
+        **issue_fields,
     }
     if getattr(args, "freeform", False):
         print("note\tstructure check skipped by --freeform", file=sys.stderr)
@@ -2233,18 +2444,16 @@ def command_create(args: argparse.Namespace, profile: Profile) -> int:
     body = {"fields": fields}
 
     if not args.confirm:
-        print(
-            "DRY-RUN Jira issue create | "
-            + " | ".join(
-                [
-                    f"profile={profile.name}",
-                    f"project={args.project}",
-                    f"issue_type={args.issue_type}",
-                    f"fields={json.dumps(fields, ensure_ascii=False, sort_keys=True)}",
-                    "confirm=pass --confirm to create the issue",
-                ]
-            )
-        )
+        preview = [
+            f"profile={profile.name}",
+            f"project={args.project}",
+            f"issue_type={args.issue_type}",
+            f"fields={json.dumps(redacted_mentions(fields), ensure_ascii=False, sort_keys=True)}",
+        ]
+        if mentioned:
+            preview.append(f"mention={mentioned}")
+        preview.append("confirm=pass --confirm to create the issue")
+        print("DRY-RUN Jira issue create | " + " | ".join(preview))
         return 0
 
     response = request(profile, "rest/api/3/issue", method="POST", body=body, retries=0)
@@ -2257,19 +2466,19 @@ def command_create(args: argparse.Namespace, profile: Profile) -> int:
         "profile": profile.name,
         "url": f"{profile.base_url}/browse/{response['key']}",
     }
+    if mentioned:
+        result["mention"] = mentioned
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
-        print(
-            "Jira issue created | "
-            + " | ".join(
-                [
-                    f"profile={profile.name}",
-                    f"issue={response['key']}",
-                    f"url={result['url']}",
-                ]
-            )
-        )
+        written = [
+            f"profile={profile.name}",
+            f"issue={response['key']}",
+            f"url={result['url']}",
+        ]
+        if mentioned:
+            written.append(f"mention={mentioned}")
+        print("Jira issue created | " + " | ".join(written))
     return 0
 
 
@@ -2281,12 +2490,13 @@ def command_edit(args: argparse.Namespace, profile: Profile) -> int:
     if description is not None and args.clear_description:
         raise JiraError("Pass either --description or --clear-description, not both.")
     fields: dict[str, Any] = {}
+    mentioned: str | None = None
     if args.summary is not None:
         if not args.summary.strip():
             raise JiraError("Issue summary must not be empty.")
         fields["summary"] = args.summary
     if description is not None:
-        fields["description"] = markdown_to_adf(description)
+        fields["description"], mentioned = document_with_mentions(description, profile)
     if args.clear_description:
         fields["description"] = None
     epic = getattr(args, "epic", None)
@@ -2300,17 +2510,16 @@ def command_edit(args: argparse.Namespace, profile: Profile) -> int:
 
     body = {"fields": fields}
     if not args.confirm:
-        print(
-            "DRY-RUN Jira issue edit | "
-            + " | ".join(
-                [
-                    f"profile={profile.name}",
-                    f"issue={args.issue_key}",
-                    f"fields={json.dumps(fields, ensure_ascii=False, sort_keys=True)}",
-                    "confirm=pass --confirm to edit the issue",
-                ]
-            )
-        )
+        preview = [
+            f"profile={profile.name}",
+            f"project={args.issue_key.split('-', 1)[0]}",
+            f"issue={args.issue_key}",
+            f"fields={json.dumps(redacted_mentions(fields), ensure_ascii=False, sort_keys=True)}",
+        ]
+        if mentioned:
+            preview.append(f"mention={mentioned}")
+        preview.append("confirm=pass --confirm to edit the issue")
+        print("DRY-RUN Jira issue edit | " + " | ".join(preview))
         return 0
 
     request(
@@ -2321,19 +2530,19 @@ def command_edit(args: argparse.Namespace, profile: Profile) -> int:
         retries=0,
     )
     result = {"issue_key": args.issue_key, "profile": profile.name, "edited_fields": sorted(fields)}
+    if mentioned:
+        result["mention"] = mentioned
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
-        print(
-            "Jira issue edited | "
-            + " | ".join(
-                [
-                    f"profile={profile.name}",
-                    f"issue={args.issue_key}",
-                    f"fields={','.join(sorted(fields))}",
-                ]
-            )
-        )
+        written = [
+            f"profile={profile.name}",
+            f"issue={args.issue_key}",
+            f"fields={','.join(sorted(fields))}",
+        ]
+        if mentioned:
+            written.append(f"mention={mentioned}")
+        print("Jira issue edited | " + " | ".join(written))
     return 0
 
 
@@ -2426,19 +2635,19 @@ def command_comment(args: argparse.Namespace, profile: Profile) -> int:
     if not said or not said.strip():
         raise JiraError("Nothing to comment: pass --body, --body-file, or --body - for stdin.")
 
-    body = {"body": markdown_to_adf(said)}
+    document, mentioned = document_with_mentions(said, profile)
+    body = {"body": document}
     if not args.confirm:
-        print(
-            "DRY-RUN Jira comment add | "
-            + " | ".join(
-                [
-                    f"profile={profile.name}",
-                    f"issue={args.issue_key}",
-                    f"body={json.dumps(said, ensure_ascii=False)}",
-                    "confirm=pass --confirm to add the comment",
-                ]
-            )
-        )
+        preview = [
+            f"profile={profile.name}",
+            f"project={args.issue_key.split('-', 1)[0]}",
+            f"issue={args.issue_key}",
+            f"body={json.dumps(said, ensure_ascii=False)}",
+        ]
+        if mentioned:
+            preview.append(f"mention={mentioned}")
+        preview.append("confirm=pass --confirm to add the comment")
+        print("DRY-RUN Jira comment add | " + " | ".join(preview))
         return 0
 
     response = request(
@@ -2452,19 +2661,19 @@ def command_comment(args: argparse.Namespace, profile: Profile) -> int:
         raise JiraError(f"Jira comment add returned an unexpected response: {response}")
 
     result = {"issue_key": args.issue_key, "comment_id": response["id"], "profile": profile.name}
+    if mentioned:
+        result["mention"] = mentioned
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
-        print(
-            "Jira comment added | "
-            + " | ".join(
-                [
-                    f"profile={profile.name}",
-                    f"issue={args.issue_key}",
-                    f"comment_id={response['id']}",
-                ]
-            )
-        )
+        written = [
+            f"profile={profile.name}",
+            f"issue={args.issue_key}",
+            f"comment_id={response['id']}",
+        ]
+        if mentioned:
+            written.append(f"mention={mentioned}")
+        print("Jira comment added | " + " | ".join(written))
     return 0
 
 

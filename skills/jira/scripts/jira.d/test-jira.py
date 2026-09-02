@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import io
+import itertools
 import json
 import os
 import re
@@ -1250,6 +1251,567 @@ class JiraModuleTest(unittest.TestCase):
             {"body": self.module.markdown_to_adf("Progress update")},
         )
         self.assertEqual(json.loads(output.getvalue())["comment_id"], "20001")
+
+    # Native mentions. Jira renders a `mention` node as a real tag and notifies the
+    # account it names; the same characters in a text node notify nobody.
+
+    MENTION_ACCOUNT = "synthetic-account-one"
+    OTHER_ACCOUNT = "synthetic-account-two"
+
+    def mention_calls(self, users, write_response=None):
+        """Record every Jira call: `user/search` answers `users`, a write answers next."""
+        calls: list = []
+
+        def fake_request(profile, path, **kwargs):
+            calls.append({"path": path, **kwargs})
+            if path == self.module.MENTION_SEARCH_PATH:
+                return list(users)
+            if write_response is None:
+                raise AssertionError(f"unexpected live write to {path}")
+            return write_response
+
+        return calls, fake_request
+
+    def comment_args(self, **overrides):
+        args = {"issue_key": "APP-252", "body": "Progress update", "confirm": False, "json": False}
+        args.update(overrides)
+        return SimpleNamespace(**args)
+
+    def test_comment_resolves_the_mention_syntax_into_an_adf_mention_node(self) -> None:
+        calls, fake_request = self.mention_calls(
+            [{"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example", "active": True}],
+            write_response={"id": "20002"},
+        )
+        args = self.comment_args(
+            body="@[Alex Example], please review this issue.", confirm=True, json=True
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_comment(args, self.profile)
+
+        search, write = calls
+        self.assertEqual(search["path"], "rest/api/3/user/search")
+        self.assertEqual(search["params"]["query"], "Alex Example")
+        self.assertEqual(write["path"], "rest/api/3/issue/APP-252/comment")
+        content = write["body"]["body"]["content"][0]["content"]
+        self.assertEqual(
+            content[0],
+            {"type": "mention", "attrs": {"id": self.MENTION_ACCOUNT, "text": "@Alex Example"}},
+        )
+        self.assertEqual(content[1], {"type": "text", "text": ", please review this issue."})
+        self.assertEqual(json.loads(output.getvalue())["mention"], "@Alex Example")
+
+    def test_comment_dry_run_names_the_mention_and_project_but_not_the_account_id(self) -> None:
+        calls, fake_request = self.mention_calls(
+            [{"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example", "active": True}]
+        )
+        args = self.comment_args(body="@[Alex Example] please review.")
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_comment(args, self.profile)
+
+        printed = output.getvalue()
+        self.assertIn("DRY-RUN Jira comment add", printed)
+        self.assertIn("profile=example", printed)
+        self.assertIn("project=APP", printed)
+        self.assertIn("issue=APP-252", printed)
+        self.assertIn("mention=@Alex Example", printed)
+        self.assertNotIn(self.MENTION_ACCOUNT, printed)
+        self.assertEqual([call["path"] for call in calls], [self.module.MENTION_SEARCH_PATH])
+
+    def test_mention_refuses_when_no_jira_user_has_that_exact_display_name(self) -> None:
+        """Jira's search matches a prefix, so its neighbours are not the person named."""
+        calls, fake_request = self.mention_calls([
+            {"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example Jr", "active": True},
+            {"accountId": self.OTHER_ACCOUNT, "displayName": "Alexandra Roe", "active": True},
+        ])
+        args = self.comment_args(body="@[Alex Example] please review.", confirm=True)
+        with patch.object(self.module, "request", side_effect=fake_request):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.command_comment(args, self.profile)
+
+        self.assertIn("Alex Example", str(error.exception))
+        self.assertIn("no jira user", str(error.exception).lower())
+        self.assertEqual([call["path"] for call in calls], [self.module.MENTION_SEARCH_PATH])
+
+    def test_mention_refuses_when_two_jira_users_share_the_exact_display_name(self) -> None:
+        calls, fake_request = self.mention_calls([
+            {"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example", "active": True},
+            {"accountId": self.OTHER_ACCOUNT, "displayName": "Alex Example", "active": False},
+        ])
+        args = self.comment_args(body="@[Alex Example] please review.", confirm=True)
+        with patch.object(self.module, "request", side_effect=fake_request):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.command_comment(args, self.profile)
+
+        message = str(error.exception)
+        self.assertIn("2 Jira users", message)
+        self.assertNotIn(self.MENTION_ACCOUNT, message)
+        self.assertEqual([call["path"] for call in calls], [self.module.MENTION_SEARCH_PATH])
+
+    def test_mention_search_refuses_a_full_result_page_it_cannot_prove_unique(self) -> None:
+        """A capped page may hide a second exact match, so uniqueness is not provable."""
+        crowd = [
+            {"accountId": f"account-{index}", "displayName": "Alex Example"}
+            for index in range(self.module.MENTION_SEARCH_LIMIT)
+        ]
+        _, fake_request = self.mention_calls(crowd)
+        args = self.comment_args(body="@[Alex Example] please review.", confirm=True)
+        with patch.object(self.module, "request", side_effect=fake_request):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.command_comment(args, self.profile)
+
+        self.assertIn(str(self.module.MENTION_SEARCH_LIMIT), str(error.exception))
+
+    def test_mention_matches_one_display_name_across_case_and_spacing(self) -> None:
+        calls, fake_request = self.mention_calls(
+            [{"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example"}],
+            write_response={"id": "20003"},
+        )
+        args = self.comment_args(body="@[alex   example] ping", confirm=True, json=True)
+        with patch.object(self.module, "request", side_effect=fake_request), \
+                redirect_stdout(io.StringIO()):
+            self.module.command_comment(args, self.profile)
+
+        mention = calls[1]["body"]["body"]["content"][0]["content"][0]
+        self.assertEqual(mention["attrs"]["text"], "@Alex Example")
+
+    def test_more_than_one_mention_in_one_body_is_refused(self) -> None:
+        args = self.comment_args(body="@[Alex Example] and @[Jane Example] please review.")
+        with patch.object(self.module, "request", side_effect=AssertionError("live call")):
+            with self.assertRaises(self.module.JiraError) as error:
+                self.module.command_comment(args, self.profile)
+
+        self.assertIn("2", str(error.exception))
+
+    def test_an_ordinary_at_sign_name_stays_plain_text(self) -> None:
+        """The reported defect's own body must keep behaving exactly as it did."""
+        for source in ("@Alex Example, please review.", "mail alex@example.com", "@ [Alex]"):
+            document = self.module.markdown_to_adf(source)
+            self.assertNotIn("mention", json.dumps(document), source)
+            # The `[` escaping adf_to_text already applies is what keeps the readback
+            # from being re-read as a mention, so the round trip is the contract here.
+            rendered = self.module.adf_to_text(document)
+            self.assertEqual(self.module.markdown_to_adf(rendered), document, source)
+
+    def test_mention_syntax_inside_code_or_escaped_stays_literal(self) -> None:
+        for source in ("`@[Alex Example]`", "@\\[Alex Example]"):
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(self.module.collect_mention_requests(document), [], source)
+
+    def link_href(self, source):
+        """The hrefs a rendered source carries, so a lost link fails loudly."""
+        content = self.module.markdown_to_adf(source)["content"][0]["content"]
+        return [
+            mark["attrs"]["href"]
+            for node in content
+            for mark in (node.get("marks") or [])
+            if mark.get("type") == "link"
+        ]
+
+    def test_a_link_whose_label_follows_an_at_sign_keeps_its_href(self) -> None:
+        """`@[label](href)` was a working link before mentions existed; it still is."""
+        source = "@[Alex Example](https://example.test/a)"
+        document = self.module.markdown_to_adf(source)
+        self.assertEqual(self.module.collect_mention_requests(document), [])
+        self.assertEqual(self.link_href(source), ["https://example.test/a"])
+        self.assertEqual(
+            document["content"][0]["content"],
+            [
+                {"type": "text", "text": "@"},
+                {
+                    "type": "text", "text": "Alex Example",
+                    "marks": [{"type": "link", "attrs": {"href": "https://example.test/a"}}],
+                },
+            ],
+        )
+
+    def test_mention_syntax_inside_a_link_label_stays_literal_and_keeps_its_href(self) -> None:
+        """ADF carries a link on a text mark, and a mention node holds no marks."""
+        source = "[@[Alex Example]](https://example.test/a)"
+        document = self.module.markdown_to_adf(source)
+        self.assertEqual(self.module.collect_mention_requests(document), [])
+        self.assertEqual(self.link_href(source), ["https://example.test/a"])
+        self.assertEqual(
+            document["content"][0]["content"],
+            [{
+                "type": "text", "text": "@[Alex Example]",
+                "marks": [{"type": "link", "attrs": {"href": "https://example.test/a"}}],
+            }],
+        )
+
+    def test_mention_syntax_survives_a_link_label_at_any_inline_depth(self) -> None:
+        for source in (
+            "[text @[Alex Example] more](https://example.test/a)",
+            "[**@[Alex Example]**](https://example.test/a)",
+        ):
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(self.module.collect_mention_requests(document), [], source)
+            self.assertEqual(self.link_href(source), ["https://example.test/a"], source)
+
+    def test_a_complete_image_holding_mention_syntax_stays_one_literal_run(self) -> None:
+        """A complete image is text, so `@[...]` in its label is syntax, not a request."""
+        source = "![@[Alex Example]](https://example.test/a.png)"
+        document = self.module.markdown_to_adf(source)
+        self.assertEqual(self.module.collect_mention_requests(document), [])
+        self.assertEqual(self.link_href(source), [])
+        self.assertEqual(
+            document["content"][0]["content"], [{"type": "text", "text": source}]
+        )
+
+    def test_an_image_label_still_renders_its_own_inline_markup(self) -> None:
+        """Suppressing a mention inside an image must not flatten the label itself."""
+        expected = {
+            "![**b**](https://example.test/i.png)": [
+                {"type": "text", "text": "!["},
+                {"type": "text", "text": "b", "marks": [{"type": "strong"}]},
+                {"type": "text", "text": "](https://example.test/i.png)"},
+            ],
+            "![`c`](https://example.test/i.png)": [
+                {"type": "text", "text": "!["},
+                {"type": "text", "text": "c", "marks": [{"type": "code"}]},
+                {"type": "text", "text": "](https://example.test/i.png)"},
+            ],
+            "![*e*](https://example.test/i.png)": [
+                {"type": "text", "text": "!["},
+                {"type": "text", "text": "e", "marks": [{"type": "em"}]},
+                {"type": "text", "text": "](https://example.test/i.png)"},
+            ],
+            "![~~s~~](https://example.test/i.png)": [
+                {"type": "text", "text": "!["},
+                {"type": "text", "text": "s", "marks": [{"type": "strike"}]},
+                {"type": "text", "text": "](https://example.test/i.png)"},
+            ],
+            "![x [y](https://example.test/y) z](https://example.test/i.png)": [
+                {"type": "text", "text": "![x "},
+                {
+                    "type": "text", "text": "y",
+                    "marks": [{"type": "link", "attrs": {"href": "https://example.test/y"}}],
+                },
+                {"type": "text", "text": " z](https://example.test/i.png)"},
+            ],
+            "![a\\]b](https://example.test/i.png)": [
+                {"type": "text", "text": "![a]b](https://example.test/i.png)"},
+            ],
+        }
+        for source, content in expected.items():
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(self.module.collect_mention_requests(document), [], source)
+            self.assertEqual(document["content"][0]["content"], content, source)
+
+    def test_a_complete_image_reserves_the_syntax_at_every_inline_depth(self) -> None:
+        """Emphasis recursion slices the scan, so the boundary travels as context.
+
+        The literal text keeps whatever marks the label gave it: suppressing the
+        mention must not also strip the strong, em, or strike around it.
+        """
+        image = "https://example.test/i.png"
+        marked = [
+            ("**@[Alex Example]**", [{"type": "strong"}]),
+            ("*@[Alex Example]*", [{"type": "em"}]),
+            ("_@[Alex Example]_", [{"type": "em"}]),
+            ("~~@[Alex Example]~~", [{"type": "strike"}]),
+            ("***@[Alex Example]***", [{"type": "strong"}, {"type": "em"}]),
+            ("**~~@[Alex Example]~~**", [{"type": "strong"}, {"type": "strike"}]),
+        ]
+        for label, expected_marks in marked:
+            source = f"![{label}]({image})"
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(self.module.collect_mention_requests(document), [], source)
+            self.assertEqual(
+                document["content"][0]["content"],
+                [
+                    {"type": "text", "text": "!["},
+                    {"type": "text", "text": "@[Alex Example]", "marks": expected_marks},
+                    {"type": "text", "text": f"]({image})"},
+                ],
+                source,
+            )
+
+    def test_a_complete_image_reserves_the_syntax_after_a_code_span_or_link(self) -> None:
+        """The other two recursion paths into a label must reserve it as well."""
+        image = "https://example.test/i.png"
+        for source in (
+            f"![`@[Alex Example]`]({image})",
+            f"![[@[Alex Example]](https://example.test/y)]({image})",
+            f"![x **@[Alex Example]** y]({image})",
+        ):
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(self.module.collect_mention_requests(document), [], source)
+
+    def test_marks_outside_an_image_still_carry_a_mention_request(self) -> None:
+        """The reservation is the image, not the mark, so ordinary emphasis still asks."""
+        for source in (
+            "**@[Alex Example]** please review.",
+            "*@[Alex Example]* please review.",
+            "~~@[Alex Example]~~ please review.",
+        ):
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(
+                self.module.collect_mention_requests(document), ["Alex Example"], source
+            )
+
+    def test_an_image_label_body_never_reaches_the_jira_user_search(self) -> None:
+        calls, fake_request = self.mention_calls([], write_response={"id": "20005"})
+        args = self.comment_args(
+            body="![**@[Alex Example]**](https://example.test/i.png)", confirm=True, json=True
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_comment(args, self.profile)
+
+        self.assertEqual([call["path"] for call in calls], ["rest/api/3/issue/APP-252/comment"])
+        self.assertNotIn("mention", json.loads(output.getvalue()))
+        self.assertNotIn("mentionRequest", json.dumps(calls[0]["body"]))
+
+    def oversized(self, tail: str) -> str:
+        """One inline segment one character past the writer's scan limit."""
+        return ("x" * (self.module.INLINE_SCAN_LIMIT + 1)) + " " + tail
+
+    def test_a_mention_past_the_inline_scan_limit_refuses_instead_of_writing_text(self) -> None:
+        """Past the bound the writer returns raw text; a mention there notifies nobody."""
+        with self.assertRaises(self.module.JiraError) as error:
+            self.module.markdown_to_adf(self.oversized("@[Alex Example]"))
+
+        message = str(error.exception)
+        self.assertIn(str(self.module.INLINE_SCAN_LIMIT), message)
+        self.assertIn(self.module.MENTION_SYNTAX, message)
+        self.assertIn("Split the paragraph", message)
+        # The fixed syntax, not the name the caller happened to write.
+        self.assertNotIn("Alex Example", message)
+
+    def test_the_scan_limit_boundary_resolves_at_the_limit_and_refuses_one_past_it(self) -> None:
+        limit = self.module.INLINE_SCAN_LIMIT
+        mention = "@[Alex Example] "
+        at_limit = mention + ("x" * (limit - len(mention)))
+        self.assertEqual(len(at_limit), limit)
+        self.assertEqual(
+            self.module.collect_mention_requests(self.module.markdown_to_adf(at_limit)),
+            ["Alex Example"],
+        )
+
+        just_over = mention + ("x" * (limit - len(mention) + 1))
+        self.assertEqual(len(just_over), limit + 1)
+        with self.assertRaises(self.module.JiraError):
+            self.module.markdown_to_adf(just_over)
+
+    def test_oversized_text_without_a_mention_keeps_its_bounded_fallback(self) -> None:
+        """Only apparent mention syntax refuses; ordinary long prose is still accepted."""
+        for tail in ("no mention here", "@Alex Example plain", "mail alex@example.com",
+                     r"@\[Alex Example]", "a[b]c"):
+            source = self.oversized(tail)
+            document = self.module.markdown_to_adf(source)
+            self.assertEqual(self.module.collect_mention_requests(document), [], tail)
+            node = document["content"][0]["content"][0]
+            self.assertEqual(node["type"], "text", tail)
+            self.assertTrue(node["text"].endswith(tail), tail)
+
+    MENTION_SHAPES_THE_WRITER_ACCEPTS = (
+        "@[Alex Example]",
+        "@[Alex [Example]]",
+        "@[A [B [C]] D]",
+        "@[Alex (Example)]",
+        "\\@[Alex Example]",
+    )
+
+    def test_every_mention_shape_the_writer_accepts_refuses_past_the_limit(self) -> None:
+        """The detector has to cover the writer's balanced brackets, not just a flat name.
+
+        `match_pair` accepts a nested bracket, so `@[Alex [Example]]` is a real request.
+        A detector that excluded nested brackets wrote it out as text instead.
+        """
+        for shape in self.MENTION_SHAPES_THE_WRITER_ACCEPTS:
+            with self.subTest(shape=shape):
+                self.assertTrue(
+                    self.module.collect_mention_requests(self.module.markdown_to_adf(shape)),
+                    "fixture no longer parses as a mention",
+                )
+                with self.assertRaises(self.module.JiraError):
+                    self.module.markdown_to_adf(self.oversized(shape))
+
+    def test_apparent_syntax_refuses_conservatively_past_the_limit(self) -> None:
+        """Classifying these needs the scan the limit forbids, so they refuse as apparent.
+
+        Each one is literal text to the ordinary writer. Refusing is the documented
+        conservative half of the contract: never silently write something that looks
+        like a mention.
+        """
+        for apparent in ("@[   ]", "@[]", "@[Alex Example",
+                         "`@[Alex Example]`",
+                         "@[Alex Example](https://example.test/a)",
+                         "![@[Alex Example]](https://example.test/i.png)"):
+            with self.subTest(apparent=apparent):
+                self.assertEqual(
+                    self.module.collect_mention_requests(self.module.markdown_to_adf(apparent)),
+                    [],
+                    "fixture should be literal to the ordinary writer",
+                )
+                with self.assertRaises(self.module.JiraError):
+                    self.module.markdown_to_adf(self.oversized(apparent))
+
+    def test_the_detector_never_misses_a_request_the_writer_would_make(self) -> None:
+        """Soundness over generated candidates: recognized short implies refused oversized."""
+        alphabet = "@[]\\`() !*A"
+        candidates = {"".join(combo) for combo in itertools.product(alphabet, repeat=3)}
+        candidates.update(self.MENTION_SHAPES_THE_WRITER_ACCEPTS)
+        recognized = 0
+        for candidate in candidates:
+            if not self.module.collect_mention_requests(self.module.markdown_to_adf(candidate)):
+                continue
+            recognized += 1
+            with self.assertRaises(self.module.JiraError, msg=repr(candidate)):
+                self.module.markdown_to_adf(self.oversized(candidate))
+        self.assertGreater(recognized, 0, "the sweep exercised no mention at all")
+
+    def test_an_oversized_mention_refuses_before_any_jira_call(self) -> None:
+        """The refusal has to land before the user search and before the write."""
+        for confirm in (False, True):
+            calls: list = []
+
+            def spy(profile, path, **kwargs):
+                calls.append(path)
+                raise AssertionError(f"network reached: {path}")
+
+            args = self.comment_args(body=self.oversized("@[Alex Example]"), confirm=confirm)
+            output = io.StringIO()
+            with patch.object(self.module, "request", side_effect=spy), redirect_stdout(output):
+                with self.assertRaises(self.module.JiraError):
+                    self.module.command_comment(args, self.profile)
+
+            self.assertEqual(calls, [], f"confirm={confirm}")
+            self.assertEqual(output.getvalue(), "", f"confirm={confirm}")
+
+    # Suffixes shaped like the material a body should never put on a terminal. The
+    # values are synthetic; what matters is that none of them can reach any stream.
+    SECRET_SHAPED_SUFFIXES = (
+        ("JIRA_API_TOKEN=synthetic-secret", "synthetic-secret"),
+        ("token=synthetic-bearer-value", "synthetic-bearer-value"),
+        ("password=synthetic-pw", "synthetic-pw"),
+        ("authorization: Basic c3ludGhldGlj", "c3ludGhldGlj"),
+        ("cookie=session=synthetic-cookie", "synthetic-cookie"),
+        ("@[" + ("A" * 300) + "]", "A" * 300),
+    )
+
+    def test_the_over_limit_refusal_emits_nothing_drawn_from_the_body(self) -> None:
+        """A body holds whatever was pasted into it, so none of it may be quoted back.
+
+        The refusal used to echo a window of the line after `@[`, which put an
+        adjacent token or header straight onto stderr.
+        """
+        for suffix, forbidden in self.SECRET_SHAPED_SUFFIXES:
+            with self.subTest(suffix=suffix):
+                body = self.oversized("@[Alex Example] " + suffix)
+                args = self.comment_args(body=body, confirm=True)
+                out, err = io.StringIO(), io.StringIO()
+                with patch.object(
+                    self.module, "request", side_effect=AssertionError("live call")
+                ), redirect_stdout(out), redirect_stderr(err):
+                    with self.assertRaises(self.module.JiraError) as error:
+                        self.module.command_comment(args, self.profile)
+
+                for stream in (str(error.exception), out.getvalue(), err.getvalue()):
+                    self.assertNotIn(forbidden, stream)
+                    self.assertNotIn("xxxxxxxxxx", stream)
+
+    def test_the_over_limit_refusal_is_fixed_text_of_a_bounded_length(self) -> None:
+        """Every refusal is the same sentence, so its size cannot follow the body."""
+        messages = set()
+        for suffix, _ in self.SECRET_SHAPED_SUFFIXES:
+            for pad in (1, 5000):
+                value = ("x" * (self.module.INLINE_SCAN_LIMIT + pad)) + " @[Alex] " + suffix
+                with self.assertRaises(self.module.JiraError) as error:
+                    self.module.markdown_to_adf(value)
+                messages.add(str(error.exception))
+
+        self.assertEqual(len(messages), 1, "the refusal varies with the body")
+        self.assertLess(len(messages.pop()), 500)
+
+    def test_a_link_label_past_the_depth_bound_reserves_rather_than_refuses(self) -> None:
+        """Link labels already keep the syntax literal, so the bound must not refuse there."""
+        deep = "[" * 60 + "@[Alex Example]" + "](https://example.test/a)" * 60
+        document = self.module.markdown_to_adf(deep)
+        self.assertEqual(self.module.collect_mention_requests(document), [])
+
+    def test_incomplete_image_syntax_does_not_reserve_the_mention(self) -> None:
+        """Only a complete `![label](target)` is an image; a stray `![` is not."""
+        document = self.module.markdown_to_adf("![@[Alex Example]]")
+        self.assertEqual(self.module.collect_mention_requests(document), ["Alex Example"])
+        self.assertEqual(
+            document["content"][0]["content"],
+            [
+                {"type": "text", "text": "!["},
+                {"type": "mentionRequest", "attrs": {"text": "Alex Example"}},
+                {"type": "text", "text": "]"},
+            ],
+        )
+
+    def test_a_link_body_never_reaches_the_jira_user_search(self) -> None:
+        """A link is not a mention, so it must cost no user lookup and no refusal."""
+        calls, fake_request = self.mention_calls([], write_response={"id": "20004"})
+        args = self.comment_args(
+            body="See @[Alex Example](https://example.test/a) and "
+                 "[@[Jane Example]](https://example.test/b).",
+            confirm=True,
+            json=True,
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), redirect_stdout(output):
+            self.module.command_comment(args, self.profile)
+
+        self.assertEqual([call["path"] for call in calls], ["rest/api/3/issue/APP-252/comment"])
+        self.assertNotIn("mention", json.loads(output.getvalue()))
+        self.assertIn("https://example.test/a", json.dumps(calls[0]["body"]))
+        self.assertIn("https://example.test/b", json.dumps(calls[0]["body"]))
+
+    def test_create_preview_redacts_the_mention_account_id(self) -> None:
+        calls, fake_request = self.mention_calls(
+            [{"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example"}]
+        )
+        args = self.create_args(
+            freeform=True, description="## Objective\n\n@[Alex Example] owns this."
+        )
+        output = io.StringIO()
+        with patch.object(self.module, "request", side_effect=fake_request), \
+                redirect_stderr(io.StringIO()), redirect_stdout(output):
+            self.module.command_create(args, self.profile)
+
+        printed = output.getvalue()
+        self.assertIn("DRY-RUN Jira issue create", printed)
+        self.assertIn("mention=@Alex Example", printed)
+        self.assertIn(self.module.MENTION_ID_REDACTION, printed)
+        self.assertNotIn(self.MENTION_ACCOUNT, printed)
+        self.assertEqual([call["path"] for call in calls], [self.module.MENTION_SEARCH_PATH])
+
+    def test_create_posts_the_real_account_id_in_the_description_mention(self) -> None:
+        calls, fake_request = self.mention_calls(
+            [{"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example"}],
+            write_response={"id": "10002", "key": "APP-254"},
+        )
+        args = self.create_args(
+            freeform=True, confirm=True, description="## Objective\n\n@[Alex Example] owns this."
+        )
+        with patch.object(self.module, "request", side_effect=fake_request), \
+                redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            self.module.command_create(args, self.profile)
+
+        paragraph = calls[1]["body"]["fields"]["description"]["content"][1]["content"]
+        self.assertEqual(
+            paragraph[0],
+            {"type": "mention", "attrs": {"id": self.MENTION_ACCOUNT, "text": "@Alex Example"}},
+        )
+
+    def test_edit_resolves_a_description_mention_and_refuses_before_writing(self) -> None:
+        calls, fake_request = self.mention_calls([])
+        args = SimpleNamespace(
+            issue_key="APP-252", summary=None, description="@[Absent Person] owns this.",
+            description_file=None, clear_description=False, epic=None, epic_field=None,
+            confirm=True, json=False,
+        )
+        with patch.object(self.module, "request", side_effect=fake_request):
+            with self.assertRaises(self.module.JiraError):
+                self.module.command_edit(args, self.profile)
+
+        self.assertEqual([call["path"] for call in calls], [self.module.MENTION_SEARCH_PATH])
 
     def test_create_reads_the_description_from_a_file(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

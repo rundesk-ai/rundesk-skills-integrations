@@ -164,6 +164,7 @@ markdown. Use it for a genuine exception, not to avoid writing the sections.
 | `---` | a horizontal rule |
 | `**strong**`, `*emphasis*`, `` `code` ``, `~~struck~~` | inline formatting |
 | `[label](https://example.test/a)` | a link |
+| `@[Display Name]` | a native mention of that Jira user |
 
 Not supported: tables, panels, images, task lists, footnotes, and inline HTML. They are left as
 literal text rather than dropped, so nothing you write is ever lost. An image written as
@@ -185,6 +186,15 @@ Three deliberate differences from ordinary markdown:
 
 Escape a character with a backslash when you need it literally: `\*not emphasis\*`.
 
+**Mentioning someone.** `@[Alex Example]` becomes a native Jira mention: the command resolves the
+display name through Jira before writing, and Jira notifies the account it names. A bare
+`@Alex Example` stays plain text and notifies nobody. One description or comment carries one
+mention, and a name matching no Jira account, or more than one, is refused before the ticket is
+written. Write `@\[Alex Example]` to keep the characters literal; so does a complete link or image
+form, so `@[Alex Example](https://example.test/a)` is still a link and
+`![@[Alex Example]](https://example.test/i.png)` is still text. See
+[the CLI reference](cli.md) for the resolution and preview rules.
+
 ## Reading a ticket back
 
 `jira detail APP-252 --profile example --full` re-renders the stored document as markdown, so a
@@ -195,5 +205,6 @@ a code block — comes back escaped, padded, or fenced wide enough that re-rende
 same ticket. A ticket written in Jira's own editor
 reads back with its headings, lists, code blocks, quotes, rules, and inline formatting intact; a
 construct this catalog does not render — a table, a panel, an expand — arrives as its text without
-that structure. A mention or emoji reads back as its display text. Raise
+that structure. A mention or emoji reads back as its display text, so a read-back that is re-sent as a
+description sends plain text rather than mentioning anyone again. Raise
 `--description-limit` when a long description is being cut short.
