@@ -17,3 +17,8 @@ $RECYCLE.BIN/
 # Linux desktops
 .directory
 .Trash-*
+
+# Skills Rundesk adds (managed by Rundesk)
+/.agents/skills/naming-software-terms
+/.claude/skills/naming-software-terms
+# End of the skills Rundesk adds

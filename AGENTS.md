@@ -24,7 +24,7 @@ Keep these sources of truth aligned with the shipped files and behavior.
    Read every `SKILL.md`, reference, script, declaration, and test you will change before editing it.
 2. Inspect the skills supplied by the runtime and load the smallest complete set that applies. Use
    `writing-skills` for `SKILL.md`, applicable runtime or testing guidance for code and tests,
-   `naming-grammar-conventions` for recurring or cross-layer terminology, and `managing-github` for
+   `naming-software-terms` for recurring or cross-layer terminology, and `managing-github` for
    pull requests or releases.
 3. Search before creating. Reuse or extend the package that already owns a service API or command
    surface instead of introducing a competing path.
@@ -141,7 +141,7 @@ forms are refused rather than combined.
   boundaries. Do not narrate mechanics already clear from the code.
 - Use lowercase hyphenated package and command names. Keep the directory, manifest name, launcher,
   credential prefix, frontmatter `name`, and documented command spelling aligned.
-- Use `naming-grammar-conventions` when a term recurs across the CLI, Python, output, credential names,
+- Use `naming-software-terms` when a term recurs across the CLI, Python, output, credential names,
   and documentation. Preserve fixed vendor terminology at its boundary.
 
 ## Documentation duties
