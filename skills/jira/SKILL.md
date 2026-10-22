@@ -9,7 +9,7 @@ Run `$RUNDESK_SKILLS/jira/scripts/jira`; it resolves credentials itself, so neve
 their source. Read `references/cli.md` for setup, environment keys, output fields, API behavior, or
 validation. Read `references/agile.md` when the task involves board discovery, epics, sprints,
 backlog filtering, assignment, pagination, or Jira Software permissions. Read
-`references/ticket-format.md` before writing any issue description or comment body.
+`references/markdown.md` before passing a description or comment body.
 
 Start with `"$RUNDESK_SKILLS/jira/scripts/jira" profiles`. Use each profile's configured
 project allowlist. When an issue prefix is unclear, run:
@@ -44,13 +44,11 @@ Use compact output by default:
 "$RUNDESK_SKILLS/jira/scripts/jira" delete <KEY-123> --profile <profile>
 ```
 
-Descriptions and comment bodies are markdown. Write a real ticket, never a wall of prose — state
-the objective, the background, why it matters, the requirements, and the acceptance criteria that
-prove it is done. `create` refuses a description with no headings or missing its issue type's
-sections; `--freeform` skips that check and should stay rare. `edit` is not structure-checked, so
-keep the template when replacing a whole description. Pass anything structured with
-`--description-file` or `--body-file`, never a multi-line shell argument. Read
-`references/ticket-format.md` for the templates, the section names, and the markdown it renders.
+Descriptions and comment bodies are markdown, sent as written; the CLI renders them into Jira's
+formatting and imposes no structure. Pass anything multi-line with `--description-file` or
+`--body-file`, never a multi-line shell argument. Read `references/markdown.md` for the markdown it
+renders, mentions, and read-back, and `references/sources.md` before changing a claim about
+Jira's API or document format.
 
 Write `@[Display Name]` to place one native Jira mention in a description or comment; Jira renders
 it as a real mention and applies its own mention notification behavior. A plain `@name` stays text

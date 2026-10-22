@@ -29,7 +29,6 @@ category: providers
 - Dry-run issue creation: `jira create --profile example --project APP --issue-type Task --summary "Example task" --description-file /tmp/example-task.md`
 - Confirm issue creation: `jira create --profile example --project APP --issue-type Task --summary "Example task" --description-file /tmp/example-task.md --confirm`
 - Read the description from standard input: `jira create --profile example --project APP --issue-type Task --summary "Example task" --description -`
-- Create without the structure check: `jira create --profile example --project APP --issue-type Task --summary "Example task" --freeform`
 - Dry-run issue creation with an epic: `jira create --profile example --project APP --issue-type Task --summary "Example task" --description-file /tmp/example-task.md --epic APP-10`
 - Confirm issue creation with an epic: `jira create --profile example --project APP --issue-type Task --summary "Example task" --description-file /tmp/example-task.md --epic APP-10 --confirm`
 - Dry-run issue edit: `jira edit APP-252 --profile example --summary "Updated title"`
@@ -68,7 +67,7 @@ Default output is compact text for agent context. `list`, `search`, `backlog`, `
 
 Do not run `create --confirm`, `edit --confirm`, `upload --confirm`, `comment --confirm`, `delete --confirm`, or `attachment --output --confirm` as a smoke test
 unless the owner confirms the exact profile and target/effect. Offline tests cover the write request
-method, markdown-to-ADF rendering, ADF-to-markdown reading, ticket structure validation, description
+method, markdown-to-ADF rendering, ADF-to-markdown reading, description
 and comment input paths, native mention resolution, refusal, and account-id redaction, project
 allowlisting, multipart file upload, dry-runs, and confirmation paths.
 
@@ -287,25 +286,6 @@ Jira either.
 `@[...]` syntax, so a read-back that is re-sent sends plain text rather than mentioning anyone
 again.
 
-### Ticket Structure
-
-`create` refuses a description that has no headings, or that is missing the sections its issue type
-calls for, and the error names exactly which are absent. The check runs before the dry-run prints,
-so an unstructured ticket never previews cleanly and then fails on `--confirm`.
-
-```text
-Story, Task   Objective, Background, Business value, Requirements, Acceptance criteria, Open questions
-Bug           Problem, Steps to reproduce, Expected, Actual, Impact, Acceptance criteria
-Spike         Question, Context, Timebox, Deliverable
-```
-
-Issue types are matched by a known word, so `Bug - Production` and `User Story` both resolve. A
-type the catalog does not recognize must still carry at least one heading, but its sections are not
-checked, and the fallback is reported on stderr. `--freeform` skips the section check and still
-renders markdown. `edit` renders markdown but is not structure-checked, because an edit is often a
-targeted correction. See [Writing a Jira ticket](ticket-format.md) for the templates, the accepted
-section names, and the writing rules.
-
 ### Project Mapping Rules
 
 - The account's project list (`JIRA_PROJECTS__<ACCOUNT>`, or `JIRA_<PROFILE>_PROJECTS`, or the plain `JIRA_PROJECTS` for the default account) is the source of truth for default issue searches.
@@ -330,7 +310,7 @@ section names, and the writing rules.
 - Keep live checks small and bounded.
 - Create and edit are guarded mutations: they print a dry-run and require `--confirm`.
 - Create is bounded to the configured project allowlist and does not infer an issue type.
-- Create refuses an unstructured or missing description; `--freeform` sends it as written.
+- Create and edit send the description as written; the CLI renders markdown and imposes no structure.
 - Description and comment bodies read from a file or standard input are bounded to 262144
   characters; a longer or non-UTF-8 body is refused, never truncated or partly sent.
 - Markdown link targets are limited to `http`, `https`, and `mailto`; any other target stays
@@ -349,18 +329,9 @@ section names, and the writing rules.
 - The integration does not transition issues, perform bulk operations, or administer projects/sites.
 
 For board discovery, Agile endpoint behavior, pagination, field compatibility, and permission
-troubleshooting, see [Agile workflows](agile.md). For issue templates, section names, and the
-supported markdown, see [Writing a Jira ticket](ticket-format.md).
+troubleshooting, see [Agile workflows](agile.md). For the supported markdown, mentions, and
+read-back, see [Descriptions and comments](markdown.md).
 
 ### Official References
 
-- [Jira issue search](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/)
-- [Jira issues](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/)
-- [Atlassian Document Format](https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/)
-- [ADF mention node](https://developer.atlassian.com/cloud/jira/platform/apis/document/nodes/mention/)
-- [Jira user search](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-user-search/)
-- [Jira comments](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-comments/)
-- [Jira attachments](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-attachments/)
-- [Jira Software boards](https://developer.atlassian.com/cloud/jira/software/rest/api-group-board/)
-- [Jira Software epics](https://developer.atlassian.com/cloud/jira/software/rest/api-group-epic/)
-- [Jira Software sprints](https://developer.atlassian.com/cloud/jira/software/rest/api-group-sprint/)
+Atlassian's documentation for every surface this command uses is listed in [sources.md](./sources.md).
