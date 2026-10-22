@@ -1,26 +1,12 @@
 ## Summary
 
-<!-- State what changes and why in one or two lines. -->
+<!-- What was wrong or missing, and what is true now. One or two sentences. -->
 
--
+## Changes
 
-## Scope and compatibility
+- <!-- One change per bullet, as someone using the integration would notice it — not a file list. Add one bold **Breaking:** or **Risk:** line when it applies; it is required for auth, credentials, privacy, destructive commands, or other critical risk. -->
 
-- Packages changed:
-- User-visible behavior:
-- Preserved behavior:
-- Dependencies added: none
-- Credential, profile, or mutable-state changes: none
-- Live service mutations: none
-
-## Critical risk
-
-<!-- Required for auth, credentials, privacy, destructive commands, or other critical risk. Write "None" when no critical risk applies. -->
-
-- Risk:
-- Guard:
-
-## Validation
+## Testing
 
 - [ ] `python3 -m unittest discover -s tests -v`
 - [ ] Every touched package suite passes with its exact command recorded below, or no package changed.
@@ -30,7 +16,7 @@
 - [ ] Required GitHub checks pass for the exact head commit.
 
 ```text
-# Exact package and manual verification commands with observed results
+# Each command run on this exact head through its public launcher, with what it showed. State when no live service call was made.
 ```
 
 ## Repository gates
@@ -52,17 +38,3 @@
 - Manifest version: `<before>` → `<after>`
 - SemVer reason:
 - Release or follow-up required after merge:
-
-## Manual user path
-
-<!-- Give the shortest representative command and expected result. State clearly when no live service API call was made. -->
-
-```text
-
-```
-
-## Agent
-
-<!-- Replace the placeholder with the filing agent's display name. Do not add provider, model, tool, session, or generated-by branding. -->
-
-🤖 by <Agent>
