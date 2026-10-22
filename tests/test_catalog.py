@@ -43,29 +43,24 @@ README_HEADINGS = tuple("""# Rundesk Integration Skills
 ## Releases
 ## License""".splitlines())
 PR_HEADINGS = tuple("""## Summary
-## Scope and compatibility
-## Critical risk
-## Validation
+## Changes
+## Testing
 ## Repository gates
-## Release
-## Manual user path
-## Agent""".splitlines())
+## Release""".splitlines())
 ISSUE_TEMPLATE_CONTRACTS = {
     "bug-report.md": (
-        ("name: Bug report", "about: Report reproducible incorrect behavior",
+        ("name: Bug report", "about: Report something that is broken",
          'title: "[Bug] "', 'labels: ""', 'assignees: ""'),
-        ("## Problem", "## Reproduction", "## Expected behavior", "## Evidence",
-         "## Acceptance criteria", "## Environment", "## Scope and privacy", "## Agent"),
-        "6e8eadbdaf3198c29ed33edf6b3abaf7374cfca5adb05d46c85daedeb1281276",
+        ("## Problem", "## Steps to reproduce", "## Expected", "## Actual",
+         "## Tested", "## Done when", "## Not included"),
+        "916571368315bd276f2ae4e6c7c89c6767e109032450b311939f379f241a462e",
     ),
     "change-proposal.md": (
         ("name: Change proposal",
          "about: Propose a skill, integration, command, or repository improvement",
          'title: "[Proposal] "', 'labels: ""', 'assignees: ""'),
-        ("## Problem", "## Proposed solution", "## Evidence",
-         "## Scope and compatibility", "## Acceptance criteria", "## Verification",
-         "## Alternatives considered", "## Agent"),
-        "82c13fe89d21778e23de6c9a7ae7e918960cf78d4b2cccd69041e9160e97fdbd",
+        ("## Problem", "## Goal", "## Done when", "## Not included"),
+        "6a26590994ed49343e6b028a6ed607e39df4f4ef90c8f733640bbdaa7ac2c65d",
     ),
 }
 AGENT_GUIDE_ANCHORS = {
@@ -160,7 +155,7 @@ class IntegrationCatalog(unittest.TestCase):
     def test_repository_templates_follow_the_contract(self):
         pull_request = ROOT / ".github" / "pull_request_template.md"
         self.assertEqual(PR_HEADINGS, self.markdown_headings(pull_request))
-        self.assertIn("🤖 by <Agent>", pull_request.read_text(encoding="utf-8"))
+        self.assertNotIn("🤖", pull_request.read_text(encoding="utf-8"))
         pull_request_text = pull_request.read_text(encoding="utf-8")
         normalized_pull_request = " ".join(pull_request_text.split())
         for anchor in PR_CHECKLIST_ANCHORS:
@@ -181,7 +176,7 @@ class IntegrationCatalog(unittest.TestCase):
                 text = raw.decode("utf-8")
                 self.assertEqual(["", *frontmatter], text.split("---", 2)[1].splitlines())
                 self.assertEqual(headings, self.markdown_headings(path))
-                self.assertIn("🤖 by <Agent>", text)
+                self.assertNotIn("🤖", text)
                 self.assertEqual(digest, hashlib.sha256(raw).hexdigest())
 
     def test_readme_follows_the_catalog_contract(self):
