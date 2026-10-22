@@ -594,7 +594,7 @@ class JiraModuleTest(unittest.TestCase):
         for source in (
             "**bold `literal`**", "*soft `literal`*", "~~struck `literal`~~", "***both `literal`***",
         ):
-            args = self.create_args(freeform=True, description=source, confirm=True, json=True)
+            args = self.create_args(description=source, confirm=True, json=True)
             with patch.object(self.module, "request", side_effect=fake_request), \
                     redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
                 self.module.command_create(args, self.profile)
@@ -845,16 +845,10 @@ class JiraModuleTest(unittest.TestCase):
         self.assertEqual(self.module.clip("abc", 8), "abc")
         self.assertEqual(self.module.clip("abcdefghij", 3), "abc")
 
-    def test_every_template_shares_one_acceptance_criteria_alias_tuple(self) -> None:
-        """Two copies would let a Story and a Bug drift apart silently."""
-        story = dict(self.module.STORY_SECTIONS)["Acceptance criteria"]
-        bug = dict(self.module.BUG_SECTIONS)["Acceptance criteria"]
-        self.assertIs(story, bug)
-
     def test_create_is_dry_run_without_confirm(self) -> None:
         args = SimpleNamespace(
             project="APP",
-            issue_type="Task", freeform=True,
+            issue_type="Task",
             summary="Create this",
             description="Details",
             confirm=False,
@@ -877,7 +871,7 @@ class JiraModuleTest(unittest.TestCase):
 
         args = SimpleNamespace(
             project="APP",
-            issue_type="Task", freeform=True,
+            issue_type="Task",
             summary="Create this",
             description="Details",
             confirm=True,
@@ -909,20 +903,11 @@ class JiraModuleTest(unittest.TestCase):
 
         self.assertIn("outside configured project allowlist", str(error.exception))
 
-    STORY_DESCRIPTION = (
-        "## Objective\n\nRevoke a session.\n\n"
-        "## Background\n\nSupport waits for the TTL.\n\n"
-        "## Business value\n\nCuts the exposure window.\n\n"
-        "## Requirements\n\n- Add the endpoint\n\n"
-        "## Acceptance criteria\n\n- A revoked session returns 401\n\n"
-        "## Open questions\n\n- None\n"
-    )
-
     def create_args(self, **overrides):
         args = {
             "project": "APP", "issue_type": "Story", "summary": "Create this",
-            "description": self.STORY_DESCRIPTION, "description_file": None,
-            "freeform": False, "confirm": False, "json": False,
+            "description": "Just do the thing.", "description_file": None,
+            "confirm": False, "json": False,
         }
         args.update(overrides)
         return SimpleNamespace(**args)
@@ -934,111 +919,31 @@ class JiraModuleTest(unittest.TestCase):
             self.module.command_create(args, self.profile)
         return output.getvalue()
 
-    def test_ticket_template_matches_decorated_and_custom_issue_type_names(self) -> None:
-        for issue_type, expected in (
-            ("Story", "story"), ("User Story", "story"), ("Task", "task"), ("Sub-task", "task"),
-            ("Bug", "bug"), ("Defect", "bug"), ("Bug - Production", "bug"),
-            ("Spike", "spike"), ("Research", "spike"), ("Epic", "story"),
-        ):
-            self.assertEqual(self.module.ticket_template_for(issue_type)[0], expected, issue_type)
+    def test_create_accepts_a_description_in_any_shape(self) -> None:
+        """The description's structure is the writer's choice; the CLI only renders it."""
+        for issue_type in ("Story", "Bug", "Spike", "Kundenanfrage"):
+            output = self.run_create(self.create_args(issue_type=issue_type, description="wall of text"))
+            self.assertIn("DRY-RUN Jira issue create", output, issue_type)
+            self.assertIn('"text": "wall of text"', output, issue_type)
 
-    def test_ticket_template_is_empty_for_an_issue_type_we_do_not_know(self) -> None:
-        template, sections = self.module.ticket_template_for("Kundenanfrage")
-        self.assertEqual(template, "")
-        self.assertEqual(sections, ())
+    def test_create_accepts_no_description(self) -> None:
+        self.assertIn("DRY-RUN", self.run_create(self.create_args(description=None)))
 
-    def test_create_accepts_a_story_with_every_required_section(self) -> None:
-        self.assertIn("DRY-RUN Jira issue create", self.run_create(self.create_args()))
-
-    def test_create_accepts_alias_section_headings(self) -> None:
-        description = (
-            "## Goal\n\nx\n\n## Context\n\nx\n\n## Why\n\nx\n\n"
-            "## Scope\n\nx\n\n## Done when\n\nx\n\n## Questions\n\nx\n"
-        )
-        self.assertIn("DRY-RUN", self.run_create(self.create_args(description=description)))
-
-    def test_create_refuses_a_description_with_no_headings(self) -> None:
-        with self.assertRaises(self.module.JiraError) as error:
-            self.run_create(self.create_args(description="Just do the thing, it is obvious."))
-        message = str(error.exception)
-        self.assertIn("no headings", message)
-        self.assertIn("--freeform", message)
-        self.assertIn("ticket-format.md", message)
-
-    def test_create_refuses_a_story_missing_required_sections(self) -> None:
-        description = "## Objective\n\nRevoke a session.\n\n## Background\n\nContext.\n"
-        with self.assertRaises(self.module.JiraError) as error:
-            self.run_create(self.create_args(description=description))
-        message = str(error.exception)
-        self.assertIn("missing Business value, Requirements, Acceptance criteria, Open questions", message)
-        self.assertIn("Found: Objective, Background", message)
-
-    def test_create_refuses_a_description_that_was_never_given(self) -> None:
-        with self.assertRaises(self.module.JiraError) as error:
-            self.run_create(self.create_args(description=None))
-        self.assertIn("no description", str(error.exception))
-        self.assertIn("DRY-RUN", self.run_create(self.create_args(description=None, freeform=True)))
-
-    def test_create_requires_the_reproduction_sections_of_a_bug(self) -> None:
-        with self.assertRaises(self.module.JiraError) as error:
-            self.run_create(self.create_args(issue_type="Bug"))
-        self.assertIn("Steps to reproduce", str(error.exception))
-
-    def test_create_requires_the_timebox_and_deliverable_of_a_spike(self) -> None:
-        with self.assertRaises(self.module.JiraError) as error:
-            self.run_create(self.create_args(issue_type="Spike"))
-        self.assertIn("Timebox", str(error.exception))
-        self.assertIn("Deliverable", str(error.exception))
-
-    def test_create_holds_an_unknown_issue_type_to_the_heading_floor(self) -> None:
-        """A site's own type still may not ship a wall of text."""
-        with self.assertRaises(self.module.JiraError):
-            self.run_create(self.create_args(issue_type="Kundenanfrage", description="wall of text"))
-        self.assertIn(
-            "DRY-RUN",
-            self.run_create(self.create_args(issue_type="Kundenanfrage", description="## Anything\n\nx")),
-        )
-
-    def test_create_refuses_a_heading_that_only_mentions_a_section_name(self) -> None:
-        description = self.STORY_DESCRIPTION.replace(
-            "## Acceptance criteria", "## Not the acceptance criteria"
-        )
-        with self.assertRaises(self.module.JiraError) as error:
-            self.run_create(self.create_args(description=description))
-        self.assertIn("Acceptance criteria", str(error.exception))
-
-    def test_create_ignores_a_section_heading_buried_in_a_list(self) -> None:
-        """A section is a top-level heading, not a line inside a bullet."""
-        description = self.STORY_DESCRIPTION.replace("## Open questions", "- ## Open questions")
-        with self.assertRaises(self.module.JiraError) as error:
-            self.run_create(self.create_args(description=description))
-        self.assertIn("Open questions", str(error.exception))
-
-    def test_freeform_skips_the_check_but_still_renders_markdown(self) -> None:
+    def test_create_renders_markdown_into_the_description(self) -> None:
         captured = {}
 
         def fake_request(profile, path, **kwargs):
             captured.update(kwargs)
             return {"id": "10001", "key": "APP-253"}
 
-        args = self.create_args(description="# Heading", freeform=True, confirm=True, json=True)
+        args = self.create_args(description="# Heading", confirm=True, json=True)
         with patch.object(self.module, "request", side_effect=fake_request), \
                 redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
             self.module.command_create(args, self.profile)
         heading = captured["body"]["fields"]["description"]["content"][0]
         self.assertEqual(heading["type"], "heading")
 
-    def test_the_structure_check_runs_before_the_dry_run_is_printed(self) -> None:
-        """A clean preview followed by a refusal on --confirm is the wrong feedback order."""
-        output = io.StringIO()
-        with patch.object(self.module, "request", side_effect=AssertionError("live write")), \
-                redirect_stderr(io.StringIO()), redirect_stdout(output):
-            with self.assertRaises(self.module.JiraError):
-                self.module.command_create(self.create_args(description="wall of text"), self.profile)
-        self.assertNotIn("DRY-RUN", output.getvalue())
-
-    def test_edit_renders_markdown_without_a_structure_check(self) -> None:
-        """An edit is often a targeted correction, so it is not held to a template."""
+    def test_edit_renders_markdown(self) -> None:
         args = SimpleNamespace(
             issue_key="APP-252", summary=None, description="# Only a heading",
             description_file=None, clear_description=False, confirm=False, json=False,
@@ -1048,27 +953,6 @@ class JiraModuleTest(unittest.TestCase):
                 redirect_stdout(output):
             self.module.command_edit(args, self.profile)
         self.assertIn('"type": "heading"', output.getvalue())
-
-    def test_freeform_says_on_stderr_that_the_check_was_skipped(self) -> None:
-        errors = io.StringIO()
-        with patch.object(self.module, "request", side_effect=AssertionError("live write")), \
-                redirect_stderr(errors), redirect_stdout(io.StringIO()):
-            self.module.command_create(
-                self.create_args(description="wall of text", freeform=True), self.profile
-            )
-        self.assertIn("structure check skipped", errors.getvalue())
-
-    def test_an_unknown_issue_type_reports_its_fallback_on_stderr(self) -> None:
-        """A skipped check has to be visible, and the references promise this line."""
-        errors = io.StringIO()
-        with patch.object(self.module, "request", side_effect=AssertionError("live write")), \
-                redirect_stderr(errors), redirect_stdout(io.StringIO()):
-            self.module.command_create(
-                self.create_args(issue_type="Kundenanfrage", description="## Anything\n\nx"),
-                self.profile,
-            )
-        self.assertIn("Kundenanfrage", errors.getvalue())
-        self.assertIn("not one this catalog knows", errors.getvalue())
 
     def test_comment_reads_the_body_from_stdin(self) -> None:
         args = SimpleNamespace(
@@ -1768,7 +1652,7 @@ class JiraModuleTest(unittest.TestCase):
             [{"accountId": self.MENTION_ACCOUNT, "displayName": "Alex Example"}]
         )
         args = self.create_args(
-            freeform=True, description="## Objective\n\n@[Alex Example] owns this."
+            description="## Objective\n\n@[Alex Example] owns this."
         )
         output = io.StringIO()
         with patch.object(self.module, "request", side_effect=fake_request), \
@@ -1788,7 +1672,7 @@ class JiraModuleTest(unittest.TestCase):
             write_response={"id": "10002", "key": "APP-254"},
         )
         args = self.create_args(
-            freeform=True, confirm=True, description="## Objective\n\n@[Alex Example] owns this."
+            confirm=True, description="## Objective\n\n@[Alex Example] owns this."
         )
         with patch.object(self.module, "request", side_effect=fake_request), \
                 redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
@@ -1818,7 +1702,7 @@ class JiraModuleTest(unittest.TestCase):
             page = Path(folder) / "description.md"
             page.write_text("## Objective\n\nShip it.\n", encoding="utf-8")
             output = self.run_create(self.create_args(
-                issue_type="Task", freeform=True, description=None, description_file=str(page),
+                issue_type="Task", description=None, description_file=str(page),
             ))
         self.assertIn('"level": 2', output)
         self.assertIn("Objective", output)
@@ -1827,7 +1711,7 @@ class JiraModuleTest(unittest.TestCase):
         stdin = io.StringIO("## Objective\n\nPiped.")
         with patch.object(self.module.sys, "stdin", stdin):
             output = self.run_create(self.create_args(
-                issue_type="Task", freeform=True, description="-", description_file=None,
+                issue_type="Task", description="-", description_file=None,
             ))
         self.assertIn("Piped.", output)
 
@@ -2408,7 +2292,7 @@ class JiraModuleTest(unittest.TestCase):
             captured.update({"path": path, **kwargs})
             return {"id": "10001", "key": "APP-253"}
 
-        args = SimpleNamespace(project="APP", issue_type="Task", freeform=True, summary="Create this", description=None, epic="APP-10", epic_field=None, confirm=True, json=True)
+        args = SimpleNamespace(project="APP", issue_type="Task", summary="Create this", description=None, epic="APP-10", epic_field=None, confirm=True, json=True)
         with patch.object(self.module, "request", side_effect=fake_request), \
                 redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
             self.module.command_create(args, self.profile)

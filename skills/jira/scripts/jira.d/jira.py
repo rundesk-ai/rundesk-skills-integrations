@@ -2310,120 +2310,6 @@ def build_issue_fields(
     return fields, mentioned
 
 
-# A ticket a developer can act on states what it wants, why, and how anyone can tell it
-# is done. These are the sections each issue type must carry, with the wordings accepted
-# for each. Keep the alias lists short: a heading that passes by accident is worse than a
-# refusal that names what is missing.
-ACCEPTANCE_CRITERIA_ALIASES = ("acceptance criteria", "acceptance", "done when", "definition of done")
-STORY_SECTIONS = (
-    ("Objective", ("objective", "goal")),
-    ("Background", ("background", "context")),
-    ("Business value", ("business value", "value", "why")),
-    ("Requirements", ("requirements", "scope")),
-    ("Acceptance criteria", ACCEPTANCE_CRITERIA_ALIASES),
-    ("Open questions", ("open questions", "questions")),
-)
-BUG_SECTIONS = (
-    ("Problem", ("problem", "issue", "defect")),
-    ("Steps to reproduce", ("steps to reproduce", "reproduction", "repro", "steps")),
-    ("Expected", ("expected", "expected behavior", "expected behaviour", "expected result")),
-    ("Actual", ("actual", "actual behavior", "actual behaviour", "actual result")),
-    ("Impact", ("impact", "severity")),
-    ("Acceptance criteria", ACCEPTANCE_CRITERIA_ALIASES),
-)
-SPIKE_SECTIONS = (
-    ("Question", ("question", "research question")),
-    ("Context", ("context", "background")),
-    ("Timebox", ("timebox", "time box")),
-    ("Deliverable", ("deliverable", "deliverables", "output")),
-)
-TICKET_TEMPLATES = {
-    "story": STORY_SECTIONS,
-    "task": STORY_SECTIONS,
-    "bug": BUG_SECTIONS,
-    "spike": SPIKE_SECTIONS,
-}
-# An issue type is a free-form, site-specific string, so match a known word rather than
-# demanding an exact name. Order decides a type naming two, such as `Bug - Spike`.
-TICKET_TYPE_WORDS = (
-    ("bug", "bug"), ("defect", "bug"), ("incident", "bug"),
-    ("spike", "spike"), ("research", "spike"), ("investigation", "spike"), ("discovery", "spike"),
-    ("story", "story"), ("epic", "story"), ("feature", "story"),
-    ("task", "task"), ("subtask", "task"), ("chore", "task"), ("improvement", "task"),
-)
-
-
-def normalized_heading(value: str) -> str:
-    return " ".join(value.replace("*", "").replace("`", "").split()).strip(" :.#").lower()
-
-
-def ticket_template_for(issue_type: str) -> tuple[str, tuple]:
-    """The template an issue type calls for, or an empty one when the site names it something we do not know."""
-    words = re.findall(r"[a-z]+", issue_type.lower())
-    collapsed = "".join(words)
-    for word, template in TICKET_TYPE_WORDS:
-        if word in words or word == collapsed:
-            return template, TICKET_TEMPLATES[template]
-    return "", ()
-
-
-def document_headings(document: dict[str, Any]) -> list[str]:
-    """Top-level headings only: a section title buried in a list is not a section."""
-    return [
-        adf_inline_text(node.get("content"))
-        for node in document.get("content") or []
-        if isinstance(node, dict) and node.get("type") == "heading"
-    ]
-
-
-def validate_ticket_structure(document: dict[str, Any] | None, issue_type: str) -> None:
-    """Refuse a wall of text before it reaches Jira, naming exactly what is missing."""
-    template, sections = ticket_template_for(issue_type)
-    guidance = (
-        "Structure the description with markdown headings (see references/ticket-format.md), "
-        "or pass --freeform to send it as written."
-    )
-
-    if document is None:
-        raise JiraError(f"Refusing to create a {issue_type} with no description. {guidance}")
-
-    headings = [normalized_heading(value) for value in document_headings(document)]
-    headings = [value for value in headings if value]
-    if not headings:
-        raise JiraError(
-            f"Refusing to create a {issue_type} from a description with no headings. {guidance}"
-        )
-
-    if not sections:
-        # An unknown or localized issue type still has to clear the no-wall-of-text floor.
-        print(
-            f"note\tissue type {issue_type} is not one this catalog knows; "
-            "checked only that the description carries a heading",
-            file=sys.stderr,
-        )
-        return
-
-    missing = []
-    for name, aliases in sections:
-        if not any(
-            heading == alias or heading.startswith(alias + " ")
-            for heading in headings
-            for alias in aliases
-        ):
-            missing.append(name)
-    if missing:
-        raise JiraError(
-            f"Refusing to create a {issue_type} with an unstructured description: missing "
-            + ", ".join(missing)
-            + ". Required: "
-            + ", ".join(name for name, _ in sections)
-            + ". Found: "
-            + (", ".join(document_headings(document)) or "none")
-            + ". "
-            + guidance
-        )
-
-
 def command_create(args: argparse.Namespace, profile: Profile) -> int:
     require_project_for_write(profile, args.project)
     if not args.summary.strip():
@@ -2437,10 +2323,6 @@ def command_create(args: argparse.Namespace, profile: Profile) -> int:
         "issuetype": {"name": args.issue_type},
         **issue_fields,
     }
-    if getattr(args, "freeform", False):
-        print("note\tstructure check skipped by --freeform", file=sys.stderr)
-    else:
-        validate_ticket_structure(fields.get("description"), args.issue_type.strip())
     body = {"fields": fields}
 
     if not args.confirm:
@@ -2944,11 +2826,6 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--description-file", help="Read the markdown issue description from a file.")
     create.add_argument("--epic", help="Epic issue key to assign; Jira's Epic Link or Parent field is detected.")
     create.add_argument("--epic-field", help="Override epic field id: `parent` or `customfield_<number>`.")
-    create.add_argument(
-        "--freeform",
-        action="store_true",
-        help="Skip the ticket structure check and send the description as written.",
-    )
     create.add_argument("--confirm", action="store_true", help="Create the issue after reviewing the dry-run output.")
     create.add_argument("--json", action="store_true", help="Print the created issue reference as JSON.")
     create.set_defaults(handler=command_create)
